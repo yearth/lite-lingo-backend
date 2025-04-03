@@ -1,0 +1,73 @@
+<project_context>
+  项目类型：NestJS 后端项目
+  目标平台：与 Chrome V3 插件前端对接 (基于 WXT 框架)
+</project_context>
+
+<technology_stack>
+  - 包管理器：pnpm
+  - 框架：NestJS
+  - API 文档：Swagger (推荐)
+  - 认证：JWT (推荐)
+  - 测试：Jest (NestJS 默认)
+  - 数据库：Postsqlite (推荐)
+  - ORM：Prisma (推荐)
+</technology_stack>
+
+<workflow_rules>
+  <error_handling>
+    - 规则：处理编辑器 import 错误
+    - 描述：当遇到 `import` 无法解析或模块找不到的编辑器错误时。
+    - 禁止：**禁止**自行修改导入代码试图修复。
+    - 要求：**必须**立即报告错误信息和文件，并提示“可能是依赖未安装”。
+  </error_handling>
+  <dependency_management>
+    - 规则：添加 NestJS 模块或第三方库
+    - 描述：当需要使用新的 NestJS 模块或第三方库时。
+    - 禁止：**禁止**手动创建模块文件或复制代码。
+    - 要求：**必须**立即报告所需模块或库名称，并提示“需使用 `nest g module [module-name]` 或 `pnpm add [package-name]` 安装”。
+  </dependency_management>
+</workflow_rules>
+
+<coding_style>
+  <naming_conventions>
+    - 控制器 (Controller)：大驼峰式 (PascalCase)，以 `Controller` 结尾。示例：`UserController`
+    - 服务 (Service)：大驼峰式 (PascalCase)，以 `Service` 结尾。示例：`UserService`
+    - 模块 (Module)：大驼峰式 (PascalCase)，以 `Module` 结尾。示例：`UserModule`
+    - DTO (Data Transfer Object)：大驼峰式 (PascalCase)，以 `Dto` 结尾。示例：`CreateUserDto`
+    - 实体 (Entity)：大驼峰式 (PascalCase)，以 `Entity` 结尾。示例：`UserEntity`
+    - 变量与函数 (Variables & Functions)：小驼峰式 (camelCase)。示例：`userName`, `fetchData`
+  </naming_conventions>
+  <code_formatting>
+    - 使用 Prettier 进行代码格式化 (根据项目配置)。
+  </code_formatting>
+</coding_style>
+
+<file_organization>
+  <directory_guidelines>
+    - **模块 (Modules)：**
+      - 存放位置：`src/`
+      - 说明：每个模块应有自己的目录，包含控制器、服务、DTO、实体等。
+    - **配置 (Configuration)：**
+      - 存放位置：`src/config/`
+      - 说明：放置应用的配置文件，如数据库配置、环境变量等。
+    - **中间件 (Middlewares)：**
+      - 存放位置：`src/middlewares/`
+      - 说明：放置自定义中间件。
+    - **守卫 (Guards)：**
+      - 存放位置：`src/guards/`
+      - 说明：放置自定义守卫。
+    - **拦截器 (Interceptors)：**
+      - 存放位置：`src/interceptors/`
+      - 说明：放置自定义拦截器。
+    - **管道 (Pipes)：**
+      - 存放位置：`src/pipes/`
+      - 说明：放置自定义管道。
+    - **测试 (Tests)：**
+      - 存放位置：`test/`
+      - 说明：放置单元测试和 e2e 测试文件。
+  </directory_guidelines>
+  <restricted_directories>
+    - **禁止手动修改：** `dist/` 目录。
+    - **说明：** 该目录由 NestJS 构建生成，不应直接编辑。
+  </restricted_directories>
+</file_organization>

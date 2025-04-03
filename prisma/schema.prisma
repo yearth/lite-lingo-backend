@@ -1,0 +1,125 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // 或者 "sqlite" 如果您倾向于使用 Postsqlite
+  url      = env("DATABASE_URL")
+}
+
+// --- 用户核心信息 ---
+model User {
+  id        String        @id @default(uuid())
+  email     String?       @unique
+  googleId  String?       @unique
+  wechatId  String?       @unique
+  phone     String?       @unique
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  settings  UserSettings?
+  userWords UserWord[]
+  tags      Tag[]
+
+  @@index([email])
+  @@index([googleId])
+}
+
+// --- 用户设置 ---
+model UserSettings {
+  id                  String   @id @default(uuid())
+  userId              String   @unique
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferredVoiceId    String?
+  preferredVoice      Voice?   @relation(fields: [preferredVoiceId], references: [id], onUpdate: NoAction, onDelete: SetNull)
+  preferredAiModelId  String?
+  preferredAiModel    AIModel? @relation(fields: [preferredAiModelId], references: [id], onUpdate: NoAction, onDelete: SetNull)
+  enableNotifications Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+// --- 单词基础信息 ---
+model Word {
+  id        String     @id @default(uuid())
+  text      String
+  language  String
+  createdAt DateTime   @default(now())
+  userWords UserWord[]
+
+  @@unique([text, language])
+  @@index([text])
+}
+
+// --- 用户学习单词记录 ---
+model UserWord {
+  id             String        @id @default(uuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wordId         String
+  word           Word          @relation(fields: [wordId], references: [id], onDelete: Cascade)
+  context        String?
+  translation    String?
+  familiarity    Int           @default(0)
+  reviewCount    Int           @default(0)
+  lastReviewedAt DateTime?
+  nextReviewDate DateTime?
+  addedAt        DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  tags           UserWordTag[]
+
+  @@unique([userId, wordId])
+  @@index([userId])
+  @@index([wordId])
+  @@index([nextReviewDate])
+}
+
+// --- 标签 ---
+model Tag {
+  id           String        @id @default(uuid())
+  name         String
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime      @default(now())
+  userWordTags UserWordTag[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// --- 用户单词与标签关联 ---
+model UserWordTag {
+  userWordId String
+  userWord   UserWord @relation(fields: [userWordId], references: [id], onDelete: Cascade)
+  tagId      String
+  tag        Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  assignedAt DateTime @default(now())
+
+  @@id([userWordId, tagId])
+}
+
+// --- TTS 声音选项 ---
+model Voice {
+  id          String         @id @default(uuid())
+  name        String         @unique
+  provider    String
+  language    String
+  gender      String?
+  description String?
+  isActive    Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  settings    UserSettings[]
+}
+
+// --- AI 模型选项 ---
+model AIModel {
+  id          String         @id @default(uuid())
+  name        String         @unique
+  provider    String
+  description String?
+  isActive    Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  settings    UserSettings[]
+}
