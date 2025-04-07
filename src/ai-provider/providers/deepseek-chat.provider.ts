@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { Observable, throwError } from 'rxjs';
+import { StreamEventPayload } from '../../common/dto/stream-event-payload.dto'; // Import the payload type
 import { AiChatProvider } from '../ai-chat.provider.interface';
 import { ChatMessage } from '../chat-message.interface';
 
@@ -29,7 +30,8 @@ export class DeepseekChatProvider implements AiChatProvider {
     messages: ChatMessage[],
     model: string,
     options?: Record<string, any>,
-  ): Observable<string> {
+  ): Observable<StreamEventPayload<any>> {
+    // Changed return type
     if (!this.client) {
       this.logger.error('DeepSeek client is not initialized.');
       return throwError(
@@ -46,7 +48,8 @@ export class DeepseekChatProvider implements AiChatProvider {
       content: msg.content,
     })) as OpenAI.Chat.Completions.ChatCompletionMessageParam[];
 
-    return new Observable<string>((subscriber) => {
+    return new Observable<StreamEventPayload<any>>((subscriber) => {
+      // Changed Observable type argument
       let streamClosed = false;
       const closeStream = () => {
         if (!streamClosed) {
@@ -70,8 +73,16 @@ export class DeepseekChatProvider implements AiChatProvider {
               for await (const chunk of stream) {
                 const content = chunk.choices[0]?.delta?.content || '';
                 if (content) {
-                  subscriber.next(content);
+                  // Wrap the text chunk in the StreamEventPayload structure
+                  const event: StreamEventPayload<{ text: string }> = {
+                    type: 'text_chunk',
+                    payload: { text: content },
+                  };
+                  subscriber.next(event);
                 }
+                // TODO: Check if DeepSeek provides other info like finish_reason
+                // to potentially send a 'done' or other event types.
+                // For now, completion is handled by closeStream().
               }
               this.logger.log('DeepSeek stream finished.');
               closeStream();

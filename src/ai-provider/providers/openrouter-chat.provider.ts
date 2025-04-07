@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosError } from 'axios';
 import { Observable, catchError, map, mergeMap, throwError } from 'rxjs';
+import { StreamEventPayload } from '../../common/dto/stream-event-payload.dto'; // Import the payload type
 import { AiChatProvider } from '../ai-chat.provider.interface';
 import { ChatMessage } from '../chat-message.interface';
 
@@ -30,7 +31,8 @@ export class OpenRouterChatProvider implements AiChatProvider {
     messages: ChatMessage[],
     model: string,
     options?: Record<string, any>, // Options not directly used by OpenRouter in this basic setup
-  ): Observable<string> {
+  ): Observable<StreamEventPayload<any>> {
+    // Changed return type
     if (!this.apiKey) {
       this.logger.error('OpenRouter API Key is not configured.');
       return throwError(() => new Error('OpenRouter API Key not configured.'));
@@ -62,7 +64,8 @@ export class OpenRouterChatProvider implements AiChatProvider {
           const stream = response.data as NodeJS.ReadableStream;
           let buffer = '';
 
-          return new Observable<string>((subscriber) => {
+          return new Observable<StreamEventPayload<any>>((subscriber) => {
+            // Changed Observable type argument
             stream.on('data', (chunk) => {
               buffer += chunk.toString();
               let boundary = buffer.indexOf('\n\n');
@@ -78,9 +81,17 @@ export class OpenRouterChatProvider implements AiChatProvider {
                   try {
                     const parsed = JSON.parse(dataContent);
                     const textChunk = parsed?.choices?.[0]?.delta?.content;
-                    if (typeof textChunk === 'string') {
-                      subscriber.next(textChunk);
+                    if (typeof textChunk === 'string' && textChunk.length > 0) {
+                      // Ensure non-empty chunk
+                      // Wrap the text chunk in the StreamEventPayload structure
+                      const event: StreamEventPayload<{ text: string }> = {
+                        type: 'text_chunk',
+                        payload: { text: textChunk },
+                      };
+                      subscriber.next(event);
                     }
+                    // TODO: Check if OpenRouter provides other info like finish_reason
+                    // in the stream to potentially send a 'done' or other event types.
                   } catch (e) {
                     this.logger.error(
                       'Error parsing OpenRouter SSE data chunk:',

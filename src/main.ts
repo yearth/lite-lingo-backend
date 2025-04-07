@@ -1,6 +1,8 @@
 import { ValidationPipe } from '@nestjs/common'; // Import ValidationPipe
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter'; // Import Filter
+import { ResponseInterceptor } from './common/interceptors/response.interceptor'; // Import Interceptor
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -13,6 +15,11 @@ async function bootstrap() {
     credentials: true, // 如果需要传递 cookie 或认证头
   });
   // --------------------
+
+  // --- 全局应用 Interceptor 和 Filter ---
+  app.useGlobalInterceptors(new ResponseInterceptor()); // 应用响应拦截器
+  app.useGlobalFilters(new HttpExceptionFilter()); // 应用异常过滤器
+  // ------------------------------------
 
   // Enable global validation pipe
   app.useGlobalPipes(

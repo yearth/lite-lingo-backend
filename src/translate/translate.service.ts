@@ -1,7 +1,10 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
-import { Observable, throwError } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs'; // Import 'of'
+import { catchError, endWith, map } from 'rxjs/operators'; // Import operators
 import { AiProviderFactory } from '../ai-provider/ai-provider.factory';
 import { ChatMessage } from '../ai-provider/chat-message.interface';
+import { ApiResponse } from '../common/dto/api-response.dto'; // Import ApiResponse
+import { StreamEventPayload } from '../common/dto/stream-event-payload.dto'; // Import StreamEventPayload
 import { TranslateRequestDto } from './dto/translate-request.dto';
 
 @Injectable()
@@ -27,11 +30,15 @@ export class TranslateService {
   }
 
   /**
-   * Generates a translation stream using the specified AI provider and model.
+   * Generates a translation stream wrapped in ApiResponse structure.
    * @param dto - The translation request DTO containing text, provider, model, etc.
-   * @returns An Observable stream of translated text chunks.
+   * @returns An Observable stream of ApiResponse containing StreamEventPayload or null data in case of specific errors.
    */
-  generateStream(dto: TranslateRequestDto): Observable<string> {
+  generateStream(
+    dto: TranslateRequestDto,
+  ): Observable<ApiResponse<StreamEventPayload<any> | null>> {
+    // Allow null in data generic type
+    // Changed return type
     const providerName = dto.provider || 'openrouter'; // Default to 'openrouter'
     const requestedModel = dto.model;
 
@@ -82,9 +89,49 @@ export class TranslateService {
       this.logger.log(
         `Calling ${providerName} provider with model ${finalModel}.`,
       );
-      // Assuming generateChatStream handles internal errors and returns Observable<string> or throws
-      return provider.generateChatStream(messages, finalModel);
+      // Provider now returns Observable<StreamEventPayload<any>>
+      const streamFromProvider = provider.generateChatStream(
+        messages,
+        finalModel,
+      );
+
+      // Wrap the stream events in ApiResponse
+      return streamFromProvider.pipe(
+        map((eventPayload) => {
+          // Wrap successful event payload in ApiResponse
+          return ApiResponse.success(eventPayload, '', '0'); // Use success static method
+        }),
+        catchError((err) => {
+          // Handle errors from the provider stream
+          this.logger.error(
+            `Error during ${providerName} stream processing: ${err.message}`,
+            err.stack,
+          );
+          // Create an error payload and wrap it in ApiResponse
+          const errorPayload: StreamEventPayload<{ message: string }> = {
+            type: 'error',
+            payload: { message: err.message || 'Stream processing error' },
+          };
+          // Return an Observable emitting a single error ApiResponse
+          return of(
+            ApiResponse.error(err.message, 'STREAM_ERROR', errorPayload),
+          );
+        }),
+        // Append a 'done' event when the stream completes successfully
+        // Note: This 'done' event won't be sent if catchError handles an error,
+        // because 'of' creates a new observable that completes after one emission.
+        // The HttpExceptionFilter handles sending error events for SSE.
+        // We might only want the 'done' on successful completion.
+        endWith(
+          ApiResponse.success(
+            { type: 'done', payload: { status: 'completed' } },
+            'Stream ended',
+            '0',
+          ),
+        ),
+      );
     } catch (error) {
+      // Catch synchronous errors during setup (e.g., provider init)
       this.logger.error(
         `Error invoking generateChatStream for provider ${providerName}:`,
         error,
