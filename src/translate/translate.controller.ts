@@ -22,7 +22,7 @@ export class TranslateController {
   streamTranslation(
     @Body() translateRequestDto: TranslateRequestDto,
   ): Observable<MessageEvent> {
-    // The service now directly returns Observable<string>
+    // Pass the entire DTO to the service method
     return this.translateService.generateStream(translateRequestDto).pipe(
       map((textChunk: string): MessageEvent => {
         // Wrap each text chunk in a MessageEvent structure

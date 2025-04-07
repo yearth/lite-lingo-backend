@@ -16,4 +16,12 @@ export class TranslateRequestDto {
   @IsString()
   @IsOptional()
   sourceLanguage?: string; // Optional source language (e.g., 'en')
+
+  @IsString()
+  @IsOptional()
+  provider?: string = 'openrouter'; // Optional provider ('openrouter', 'deepseek'), defaults to 'openrouter'
+
+  @IsString()
+  @IsOptional()
+  model?: string; // Optional model name (e.g., 'deepseek-chat', 'deepseek/deepseek-chat-v3-0324:free')
 }
