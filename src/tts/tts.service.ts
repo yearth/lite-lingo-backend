@@ -53,7 +53,7 @@ export class TtsService implements OnModuleInit {
       case 'en':
       case 'en-us':
       default:
-        return 'Olivia'; // 英文或未知语言默认 (请根据阿里云文档确认 'Sean' 是否可用)
+        return 'Olivia'; // 英文默认
     }
   }
 
