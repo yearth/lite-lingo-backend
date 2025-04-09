@@ -1,4 +1,4 @@
-import { ValidationPipe } from '@nestjs/common'; // Import ValidationPipe
+import { ValidationPipe, VersioningType } from '@nestjs/common'; // Import ValidationPipe & VersioningType
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter'; // Import Filter
@@ -15,6 +15,13 @@ async function bootstrap() {
     credentials: true, // 如果需要传递 cookie 或认证头
   });
   // --------------------
+
+  // --- 启用 API 版本控制 ---
+  app.enableVersioning({
+    type: VersioningType.URI, // 使用 URI 进行版本控制 (e.g., /v1/route)
+    defaultVersion: '1', // 默认版本为 v1
+  });
+  // -------------------------
 
   // --- 全局应用 Interceptor 和 Filter ---
   app.useGlobalInterceptors(new ResponseInterceptor()); // 应用响应拦截器
