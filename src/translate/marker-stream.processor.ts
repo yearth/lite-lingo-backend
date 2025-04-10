@@ -53,7 +53,7 @@ const findFirstMarker = (
 // --- Helper function to emit text in smaller chunks ---
 const emitTextInChunks = (
   text: string,
-  chunkSize = 3, // Send 3 characters at a time
+  chunkSize = 1, // Send 1 character at a time for smoother typewriter effect
 ): ApiResponse<ApiResponseV2Data>[] => {
   const events: ApiResponse<ApiResponseV2Data>[] = [];
   for (let i = 0; i < text.length; i += chunkSize) {
