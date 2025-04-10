@@ -1,6 +1,6 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { Observable, from, throwError } from 'rxjs';
-import { catchError, mergeMap } from 'rxjs/operators';
+import { catchError, endWith, mergeMap } from 'rxjs/operators'; // Import endWith
 import { AiProviderFactory } from '../ai-provider/ai-provider.factory';
 import { ChatMessage } from '../ai-provider/chat-message.interface';
 import { ApiResponse } from '../common/dto/api-response.dto';
@@ -25,34 +25,30 @@ export class TranslateServiceV2 {
 
   constructor(private aiProviderFactory: AiProviderFactory) {}
 
-  // Build the V2 prompt for AI analysis and translation (Marker-based output)
+  // Build the V2 prompt for AI analysis and translation (Marker-based output - Simplified V2.1)
   private buildPromptV2(dto: TranslateRequestDto): ChatMessage[] {
     const targetLang = dto.targetLanguage || 'zh-CN';
     const inputText = dto.text;
     const context = dto.context;
 
-    // Define markers
+    // Define simplified markers V2.1
     const ANALYSIS_START = '[ANALYSIS_INFO_START]';
     const ANALYSIS_END = '[ANALYSIS_INFO_END]';
+    const EXPLANATION_START = '[EXPLANATION_START]'; // New: Basic word/phrase + translation
+    const EXPLANATION_END = '[EXPLANATION_END]';
     const CONTEXT_START = '[CONTEXT_EXPLANATION_START]';
     const CONTEXT_END = '[CONTEXT_EXPLANATION_END]';
-    const DICT_ENTRY_START = '[DICTIONARY_ENTRY_START]';
-    const DICT_ENTRY_END = '[DICTIONARY_ENTRY_END]';
-    const DICT_HEADER_START = '[DICTIONARY_HEADER_START]';
-    const DICT_HEADER_END = '[DICTIONARY_HEADER_END]';
-    const DEF_START = '[DEFINITION_START]';
-    const DEF_END = '[DEFINITION_END]';
-    const EXAMPLE_START = '[EXAMPLE_START]';
-    const EXAMPLE_END = '[EXAMPLE_END]';
+    const DICTIONARY_START = '[DICTIONARY_START]'; // Simplified dictionary block
+    const DICTIONARY_END = '[DICTIONARY_END]';
     const TRANS_RESULT_START = '[TRANSLATION_RESULT_START]';
     const TRANS_RESULT_END = '[TRANSLATION_RESULT_END]';
     const FRAGMENT_ERR_START = '[FRAGMENT_ERROR_START]';
     const FRAGMENT_ERR_END = '[FRAGMENT_ERROR_END]';
-    const STREAM_END_MARKER = '[STREAM_END]'; // Final marker
+    // STREAM_END_MARKER is removed, backend handles 'done' event
 
     let promptText = `You are an expert linguistic analysis and translation assistant. Your task is to analyze the provided "Input Text" within its "Context", determine its type (word, phrase, sentence, fragment), translate it to the "Target Language", and provide additional relevant information.
 
-You MUST respond by **streaming** natural language text, inserting specific **markers** before and after distinct sections of information. Do not include any introductory text or explanations outside the marked sections.
+You MUST respond by **streaming** natural language text, inserting specific **markers** before and after distinct sections of information. Do not include any introductory text or explanations outside the marked sections. The backend will automatically signal the end of the stream.
 
 Input Text: "${inputText}"\n`;
 
@@ -66,7 +62,7 @@ Follow these steps precisely:
 1.  **Immediately** start by streaming the analysis information enclosed in ${ANALYSIS_START} and ${ANALYSIS_END}. The content inside should be a single JSON object like: \`{"inputType": "...", "sourceText": "..."}\`.
 2.  Based on the 'inputType', stream the corresponding sections below, ensuring each section's content is enclosed by its respective START and END markers.
 3.  Stream text naturally within the markers. Do not output the markers themselves on new lines unless they are part of the natural text flow.
-4.  **Finally**, after all other relevant content and markers have been streamed, stream the single marker ${STREAM_END_MARKER} to signal the absolute end of the response.
+4.  Do **NOT** add any marker at the very end of the stream.
 
 Marker Schemas and Order:
 
@@ -76,22 +72,19 @@ Marker Schemas and Order:
    ${ANALYSIS_END}
 
 **B) If inputType is "word_or_phrase":**
+   ${EXPLANATION_START}
+   {Original Word/Phrase} ({General Translation})
+   ${EXPLANATION_END}
    ${CONTEXT_START}
    {Explanation of the word/phrase in context, in ${targetLang}}
    ${CONTEXT_END}
-   ${DICT_ENTRY_START}
-     ${DICT_HEADER_START}
-     {Word/Phrase} ({General Translation}) {Phonetic or empty}
-     ${DICT_HEADER_END}
-     For EACH definition:
-       ${DEF_START}
-       ({Part of Speech}) {Definition in ${targetLang}}
-       ${DEF_END}
-       For EACH corresponding example:
-         ${EXAMPLE_START}
-         (原) {Example sentence} (译) {Example translation}
-         ${EXAMPLE_END}
-   ${DICT_ENTRY_END}
+   ${DICTIONARY_START}
+   For EACH definition found:
+   DEFINITION: ({Part of Speech}) {Definition in ${targetLang}}
+   For EACH corresponding example (if available):
+   EXAMPLE: (原) {Example sentence} (译) {Example translation}
+   (Output each DEFINITION and EXAMPLE on a new line within this block)
+   ${DICTIONARY_END}
 
 **C) If inputType is "sentence":**
    ${TRANS_RESULT_START}
@@ -103,15 +96,13 @@ Marker Schemas and Order:
    无法识别或翻译选中的片段，请尝试选择完整的单词、短语或句子。 (Source: "{original fragment}")
    ${FRAGMENT_ERR_END}
 
-**E) Final Marker (ALWAYS Last):**
-   ${STREAM_END_MARKER}
-
 Important Rules:
 - Start **immediately** with ${ANALYSIS_START}.
 - Enclose **all** relevant content within the specified START and END markers.
-- Do **not** add any text outside the markers, except for the final ${STREAM_END_MARKER}.
+- Inside ${DICTIONARY_START}/${DICTIONARY_END}, prefix each definition with "DEFINITION: " and each example with "EXAMPLE: ", each on its own line.
+- Do **not** add any text outside the markers.
 - Ensure markers are exactly as specified (e.g., \`${CONTEXT_START}\`).
-- End the **entire** stream **only** with ${STREAM_END_MARKER}.`;
+- Do **NOT** output any marker after the final content block's END marker.`;
 
     return [{ role: 'user', content: promptText }];
   }
@@ -236,32 +227,27 @@ Important Rules:
           // --- End Analysis Info Extraction ---
 
           // Send the remaining/normal text chunk
+          // No need to check for [STREAM_END] anymore, endWith handles completion
           if (chunk && chunk.length > 0) {
-            // Check for the final marker and remove it if present
-            const finalMarkerIndex = chunk.indexOf('[STREAM_END]');
-            let textToSend = chunk;
-            let streamEnded = false;
-            if (finalMarkerIndex !== -1) {
-              textToSend = chunk.substring(0, finalMarkerIndex);
-              streamEnded = true; // We'll handle completion outside this map
-              this.logger.log('[V2] Detected [STREAM_END] marker.');
-            }
-
-            if (textToSend.length > 0) {
-              responsesToSend.push(
-                ApiResponse.success(
-                  { type: 'text_chunk', text: textToSend },
-                  '',
-                  '0',
-                ),
-              );
-            }
-            // Note: We don't explicitly send a 'done' event here.
-            // Completion is handled by the observable finishing naturally after [STREAM_END] is processed.
+            responsesToSend.push(
+              ApiResponse.success(
+                { type: 'text_chunk', text: chunk }, // Send the entire chunk
+                '',
+                '0',
+              ),
+            );
           }
 
           return from(responsesToSend); // Emit the prepared responses
         }),
+        // Add endWith operator here to send a final 'done' event upon successful completion
+        endWith(
+          ApiResponse.success<ApiResponseV2Data>(
+            { type: 'done', payload: { status: 'completed' } },
+            'Stream ended',
+            '0',
+          ),
+        ),
         catchError((err) => {
           this.logger.error(
             `[V2] Error during raw stream generation for ${providerName}: ${err.message}`,
@@ -284,8 +270,12 @@ Important Rules:
 
           return from([
             errorResponse,
-            // Let's rely on observable error completion for the frontend to know the stream ended abnormally.
-            // No need to send an explicit 'done' with status 'failed' here.
+            // Also send a 'done' event upon error to signal termination clearly
+            ApiResponse.success<ApiResponseV2Data>(
+              { type: 'done', payload: { status: 'failed' } },
+              'Stream ended with error',
+              '0',
+            ),
           ]);
         }),
         // Optionally add startWith if you want an initial "connecting" message, but analysis_info serves a similar purpose.
