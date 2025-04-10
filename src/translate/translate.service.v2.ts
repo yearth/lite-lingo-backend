@@ -1,19 +1,26 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
-import { Observable, from, throwError } from 'rxjs';
-import { catchError, endWith, mergeMap } from 'rxjs/operators'; // Import endWith
+import { Observable, Subject, throwError } from 'rxjs'; // Import Subject
+import { catchError, finalize } from 'rxjs/operators'; // Import finalize
 import { AiProviderFactory } from '../ai-provider/ai-provider.factory';
 import { ChatMessage } from '../ai-provider/chat-message.interface';
 import { ApiResponse } from '../common/dto/api-response.dto';
 import { TranslateRequestDto } from './dto/translate-request.dto';
+import { MarkerStreamProcessor } from './marker-stream.processor'; // Import the processor
 
-// Define the structure for the V2 ApiResponse data
+// Define the structure for the V2 ApiResponse data (can potentially be moved to a shared DTO file)
 interface ApiResponseV2Data {
-  type: 'analysis_info' | 'text_chunk' | 'error' | 'done';
-  text?: string; // For text_chunk
-  payload?: any; // For analysis_info, error, done
+  type:
+    | 'analysis_info'
+    | 'section_start'
+    | 'text_chunk'
+    | 'section_end'
+    | 'error'
+    | 'done';
+  text?: string;
+  payload?: any;
 }
 
-// Define the structure for the analysis info payload
+// Define the structure for the analysis info payload (can potentially be moved)
 interface AnalysisInfoPayload {
   inputType: 'word_or_phrase' | 'sentence' | 'fragment';
   sourceText: string;
@@ -25,7 +32,7 @@ export class TranslateServiceV2 {
 
   constructor(private aiProviderFactory: AiProviderFactory) {}
 
-  // Build the V2 prompt for AI analysis and translation (Marker-based output - Simplified V2.1)
+  // Build the V2 prompt (Simplified V2.1 - unchanged)
   private buildPromptV2(dto: TranslateRequestDto): ChatMessage[] {
     const targetLang = dto.targetLanguage || 'zh-CN';
     const inputText = dto.text;
@@ -34,11 +41,11 @@ export class TranslateServiceV2 {
     // Define simplified markers V2.1
     const ANALYSIS_START = '[ANALYSIS_INFO_START]';
     const ANALYSIS_END = '[ANALYSIS_INFO_END]';
-    const EXPLANATION_START = '[EXPLANATION_START]'; // New: Basic word/phrase + translation
+    const EXPLANATION_START = '[EXPLANATION_START]';
     const EXPLANATION_END = '[EXPLANATION_END]';
     const CONTEXT_START = '[CONTEXT_EXPLANATION_START]';
     const CONTEXT_END = '[CONTEXT_EXPLANATION_END]';
-    const DICTIONARY_START = '[DICTIONARY_START]'; // Simplified dictionary block
+    const DICTIONARY_START = '[DICTIONARY_START]';
     const DICTIONARY_END = '[DICTIONARY_END]';
     const TRANS_RESULT_START = '[TRANSLATION_RESULT_START]';
     const TRANS_RESULT_END = '[TRANSLATION_RESULT_END]';
@@ -108,7 +115,7 @@ Important Rules:
   }
 
   /**
-   * Generates a V2 translation stream with markers, wrapped in ApiResponseV2 structure.
+   * Generates a V2 translation stream with eventized markers using MarkerStreamProcessor.
    * @param dto - The translation request DTO.
    * @returns An Observable stream of ApiResponseV2.
    */
@@ -118,12 +125,14 @@ Important Rules:
     const providerName = dto.provider || 'openrouter';
     const requestedModel = dto.model;
     this.logger.log(
-      `[V2] Attempting translation via Factory for provider: ${providerName}, model: ${requestedModel || 'default'}`,
+      `[V2 Refactored] Attempting translation for provider: ${providerName}, model: ${requestedModel || 'default'}`,
     );
 
     const provider = this.aiProviderFactory.getProvider(providerName);
     if (!provider) {
-      this.logger.error(`[V2] AI Provider "${providerName}" is not available.`);
+      this.logger.error(
+        `[V2 Refactored] AI Provider "${providerName}" is not available.`,
+      );
       return throwError(
         () =>
           new HttpException(
@@ -133,7 +142,7 @@ Important Rules:
       );
     }
 
-    // Determine model (same logic as V1 for now)
+    // Determine model
     let finalModel: string;
     if (requestedModel) {
       finalModel = requestedModel;
@@ -144,152 +153,183 @@ Important Rules:
           break;
         case 'openrouter':
         default:
-          finalModel = 'deepseek/deepseek-chat-v3-0324:free'; // Example default
+          finalModel = 'deepseek/deepseek-chat-v3-0324:free';
           break;
       }
       this.logger.log(
-        `[V2] No model specified for ${providerName}, using default: ${finalModel}`,
+        `[V2 Refactored] No model specified for ${providerName}, using default: ${finalModel}`,
       );
     }
 
     const messages = this.buildPromptV2(dto);
 
+    // Use a Subject to manually control the output stream
+    const subject = new Subject<ApiResponse<ApiResponseV2Data>>();
+    let streamErrored = false;
+
     try {
       this.logger.log(
-        `[V2] Calling ${providerName} provider (raw stream) with model ${finalModel}.`,
+        `[V2 Refactored] Calling ${providerName} provider (raw stream) with model ${finalModel}.`,
       );
       const rawStreamFromProvider = provider.generateRawChatStream(
         messages,
         finalModel,
       );
 
+      const processor = new MarkerStreamProcessor(); // Instantiate the processor
       let analysisInfoSent = false;
-      let analysisBuffer = '';
       const ANALYSIS_START_MARKER = '[ANALYSIS_INFO_START]';
       const ANALYSIS_END_MARKER = '[ANALYSIS_INFO_END]';
+      let analysisBuffer = ''; // Buffer specifically for analysis info
 
-      return rawStreamFromProvider.pipe(
-        mergeMap((chunk: string) => {
-          const responsesToSend: ApiResponse<ApiResponseV2Data>[] = [];
+      const subscription = rawStreamFromProvider
+        .pipe(
+          finalize(() => {
+            this.logger.log('[V2 Refactored] Raw stream finalized.');
+            if (!subject.closed) {
+              // Process any remaining buffer in the processor
+              const finalEvents = processor.finalize();
+              finalEvents.forEach((event) => subject.next(event));
 
-          // --- Handle Analysis Info Extraction ---
-          if (!analysisInfoSent) {
-            analysisBuffer += chunk;
-            const startIndex = analysisBuffer.indexOf(ANALYSIS_START_MARKER);
-            const endIndex = analysisBuffer.indexOf(ANALYSIS_END_MARKER);
-
-            if (startIndex !== -1 && endIndex !== -1 && startIndex < endIndex) {
-              const jsonStr = analysisBuffer
-                .substring(startIndex + ANALYSIS_START_MARKER.length, endIndex)
-                .trim();
-              try {
-                const analysisPayload: AnalysisInfoPayload =
-                  JSON.parse(jsonStr);
-                // Send the analysis info as a separate event
-                responsesToSend.push(
-                  ApiResponse.success(
-                    { type: 'analysis_info', payload: analysisPayload },
-                    'Analysis info extracted',
+              // Send the final 'done' event ONLY if the stream completed successfully
+              if (!streamErrored) {
+                subject.next(
+                  ApiResponse.success<ApiResponseV2Data>(
+                    { type: 'done', payload: { status: 'completed' } },
+                    'Stream ended',
                     '0',
                   ),
                 );
-                analysisInfoSent = true;
-                // Add the remaining part of the buffer (after ANALYSIS_END) back for normal processing
-                chunk = analysisBuffer.substring(
-                  endIndex + ANALYSIS_END_MARKER.length,
+              }
+              subject.complete();
+            }
+          }),
+          catchError((err) => {
+            streamErrored = true;
+            this.logger.error(
+              `[V2 Refactored] Error during raw stream generation for ${providerName}: ${err.message}`,
+              err.stack,
+            );
+            if (!subject.closed) {
+              const errorPayload: ApiResponseV2Data = {
+                type: 'error',
+                payload: {
+                  message:
+                    err.message ||
+                    'An unexpected error occurred during V2 streaming',
+                },
+              };
+              subject.next(
+                ApiResponse.error<ApiResponseV2Data>(
+                  err.message,
+                  'STREAM_GENERATION_ERROR',
+                  errorPayload,
+                ) as ApiResponse<ApiResponseV2Data>,
+              );
+              subject.next(
+                ApiResponse.success<ApiResponseV2Data>(
+                  { type: 'done', payload: { status: 'failed' } },
+                  'Stream ended with error',
+                  '0',
+                ),
+              );
+              subject.complete();
+            }
+            return throwError(() => err); // Propagate error
+          }),
+        )
+        .subscribe({
+          next: (chunk: string) => {
+            if (subject.closed) return; // Don't process if downstream unsubscribed
+
+            // 1. Handle Analysis Info Extraction Separately First
+            if (!analysisInfoSent) {
+              analysisBuffer += chunk;
+              const startIndex = analysisBuffer.indexOf(ANALYSIS_START_MARKER);
+              const endIndex = analysisBuffer.indexOf(ANALYSIS_END_MARKER);
+
+              if (startIndex !== -1 && endIndex !== -1 && startIndex < endIndex) {
+                const jsonStr = analysisBuffer
+                  .substring(startIndex + ANALYSIS_START_MARKER.length, endIndex)
+                  .trim();
+                try {
+                  const analysisPayload: AnalysisInfoPayload =
+                    JSON.parse(jsonStr);
+                  subject.next(
+                    ApiResponse.success({
+                      type: 'analysis_info',
+                      payload: analysisPayload,
+                    }),
+                  );
+                  analysisInfoSent = true;
+                  // Process the remaining part of the buffer using the processor
+                  const remainingChunk = analysisBuffer.substring(
+                    endIndex + ANALYSIS_END_MARKER.length,
+                  );
+                  analysisBuffer = ''; // Clear analysis buffer
+                  if (remainingChunk.length > 0) {
+                    const events = processor.process(remainingChunk);
+                    events.forEach((event) => subject.next(event));
+                  }
+                } catch (e) {
+                  this.logger.error(
+                    '[V2 Refactored] Failed to parse analysis info JSON:',
+                    e,
+                    `JSON String: ${jsonStr}`,
+                  );
+                  analysisInfoSent = true; // Skip trying again
+                  // Process the entire buffer using the processor now
+                  const events = processor.process(analysisBuffer);
+                  events.forEach((event) => subject.next(event));
+                  analysisBuffer = '';
+                }
+              } else if (analysisBuffer.length > 1000) {
+                this.logger.warn(
+                  '[V2 Refactored] Analysis info markers not found within buffer limit.',
                 );
-                analysisBuffer = ''; // Clear buffer
-              } catch (e) {
-                this.logger.error(
-                  '[V2] Failed to parse analysis info JSON:',
-                  e,
-                  `JSON String: ${jsonStr}`,
-                );
-                // Decide how to handle parsing error - maybe send an error event?
-                // For now, we'll just log and proceed, potentially losing analysis info.
-                analysisInfoSent = true; // Prevent trying again
-                chunk = analysisBuffer; // Process the whole buffer as text chunk
+                analysisInfoSent = true; // Give up
+                // Process the entire buffer using the processor
+                const events = processor.process(analysisBuffer);
+                events.forEach((event) => subject.next(event));
                 analysisBuffer = '';
               }
-            } else if (analysisBuffer.length > 500) {
-              // Safety break: If buffer gets too long without finding markers, assume something went wrong
-              this.logger.warn(
-                '[V2] Analysis info markers not found within reasonable buffer length. Proceeding without analysis info.',
-              );
-              analysisInfoSent = true;
-              chunk = analysisBuffer;
-              analysisBuffer = '';
+              // If analysis info not yet sent/parsed, wait for more data
             } else {
-              // Markers not yet found, keep buffering, don't send anything yet
-              return from([]); // Return empty observable for this chunk
+              // 2. Analysis info already sent, process chunk normally
+              const events = processor.process(chunk);
+              events.forEach((event) => subject.next(event));
             }
-          }
-          // --- End Analysis Info Extraction ---
-
-          // Send the remaining/normal text chunk
-          // No need to check for [STREAM_END] anymore, endWith handles completion
-          if (chunk && chunk.length > 0) {
-            responsesToSend.push(
-              ApiResponse.success(
-                { type: 'text_chunk', text: chunk }, // Send the entire chunk
-                '',
-                '0',
-              ),
+          },
+          error: (err) => {
+            // Error is handled by catchError
+            this.logger.error(
+              '[V2 Refactored] Raw stream subscription error:',
+              err,
             );
-          }
+          },
+          complete: () => {
+            // Completion is handled by finalize
+            this.logger.log(
+              '[V2 Refactored] Raw stream subscription completed signal received.',
+            );
+          },
+        });
 
-          return from(responsesToSend); // Emit the prepared responses
-        }),
-        // Add endWith operator here to send a final 'done' event upon successful completion
-        endWith(
-          ApiResponse.success<ApiResponseV2Data>(
-            { type: 'done', payload: { status: 'completed' } },
-            'Stream ended',
-            '0',
-          ),
-        ),
-        catchError((err) => {
-          this.logger.error(
-            `[V2] Error during raw stream generation for ${providerName}: ${err.message}`,
-            err.stack,
-          );
-          const errorPayload: ApiResponseV2Data = {
-            type: 'error',
-            payload: {
-              message:
-                err.message ||
-                'An unexpected error occurred during V2 streaming',
-            },
-          };
-          // Send error response, assert the type as data is guaranteed not null here
-          const errorResponse = ApiResponse.error<ApiResponseV2Data>(
-            err.message,
-            'STREAM_GENERATION_ERROR',
-            errorPayload, // errorPayload is guaranteed to be ApiResponseV2Data
-          ) as ApiResponse<ApiResponseV2Data>; // Type assertion here
-
-          return from([
-            errorResponse,
-            // Also send a 'done' event upon error to signal termination clearly
-            ApiResponse.success<ApiResponseV2Data>(
-              { type: 'done', payload: { status: 'failed' } },
-              'Stream ended with error',
-              '0',
-            ),
-          ]);
-        }),
-        // Optionally add startWith if you want an initial "connecting" message, but analysis_info serves a similar purpose.
-        // startWith(ApiResponse.success({ type: 'info', text: 'Connecting V2 stream...' }, '', '0'))
-      );
+      // Return the subject as an Observable
+      return subject.asObservable();
     } catch (error) {
       this.logger.error(
-        `[V2] Error invoking generateRawChatStream for provider ${providerName}:`,
+        `[V2 Refactored] Error invoking generateRawChatStream for provider ${providerName}:`,
         error,
       );
+      if (!subject.closed) {
+        subject.error(error);
+        subject.complete();
+      }
       return throwError(
         () =>
           new HttpException(
-            `[V2] Failed to initiate raw stream with provider ${providerName}.`,
+            `[V2 Refactored] Failed to initiate raw stream with provider ${providerName}.`,
             HttpStatus.INTERNAL_SERVER_ERROR,
           ),
       );
