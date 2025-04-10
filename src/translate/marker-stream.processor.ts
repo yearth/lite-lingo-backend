@@ -50,6 +50,20 @@ const findFirstMarker = (
   return firstMarker;
 };
 
+// --- Helper function to emit text in smaller chunks ---
+const emitTextInChunks = (
+  text: string,
+  chunkSize = 3, // Send 3 characters at a time
+): ApiResponse<ApiResponseV2Data>[] => {
+  const events: ApiResponse<ApiResponseV2Data>[] = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    const chunk = text.substring(i, i + chunkSize);
+    events.push(ApiResponse.success({ type: 'text_chunk', text: chunk }));
+  }
+  return events;
+};
+// ----------------------------------------------------
+
 export class MarkerStreamProcessor {
   private buffer = '';
   private currentSection: string | null = null;
@@ -68,24 +82,18 @@ export class MarkerStreamProcessor {
         const { marker, index, isStart } = firstMarkerInfo;
         const textBeforeMarker = this.buffer.substring(0, index);
 
-        // Emit text before the marker if it exists and we are inside a section
-        if (textBeforeMarker.length > 0) {
-          if (this.currentSection) {
-            eventsToSend.push(
-              ApiResponse.success({
-                type: 'text_chunk',
-                text: textBeforeMarker,
-              }),
-            );
-          } else if (textBeforeMarker.trim() !== '') {
-            // Text outside any section - log warning?
-            this.logger.warn(
-              `Text found outside section: "${textBeforeMarker}"`,
-            );
-          }
+        // Emit text *only* if it exists AND we are currently inside a section
+        if (textBeforeMarker.length > 0 && this.currentSection) {
+          // --- Emit text in chunks ---
+          eventsToSend.push(...emitTextInChunks(textBeforeMarker));
+          // --------------------------
+        } else if (textBeforeMarker.length > 0 && !this.currentSection && textBeforeMarker.trim() !== '') {
+           this.logger.warn(
+             `Ignoring text found outside section: "${textBeforeMarker}"`,
+           );
         }
 
-        // Handle the marker itself
+        // Handle the marker itself (Emit section start/end events)
         if (isStart) {
           const sectionName = SectionNames[marker];
           if (sectionName) {
@@ -122,36 +130,30 @@ export class MarkerStreamProcessor {
             this.currentSection = null; // Section closed
           } else {
             this.logger.warn(
-              `Encountered ${marker} but expected end for ${this.currentSection} or no section open.`,
+              `Encountered ${marker} but expected end for ${this.currentSection} or no section open. Ignoring marker.`,
             );
-            // Ignore unexpected end marker?
           }
         }
 
-        // Remove processed text and marker from buffer
+        // Remove processed text *and* the marker from buffer
         this.buffer = this.buffer.substring(index + marker.length);
-        continueProcessing = true; // A marker was processed, loop again to check the rest of the buffer
+        continueProcessing = true; // A marker was processed, check buffer again
       }
     } // End while loop
-
-    // IMPORTANT: Do NOT emit remaining buffer here.
-    // It might contain partial markers or text that belongs to the next chunk.
-    // Only emit text *before* a detected marker within the loop.
-    // The finalize method will handle any truly remaining text at the very end.
 
     return eventsToSend;
   }
 
   finalize(): ApiResponse<ApiResponseV2Data>[] {
     const eventsToSend: ApiResponse<ApiResponseV2Data>[] = [];
-    // Process any final remaining buffer content as text if a section is open
+    // If there's remaining buffer content AND we were inside a section, emit it as the final text chunk(s).
     if (this.buffer.length > 0 && this.currentSection) {
-      this.logger.warn(
+      this.logger.log(
         `Emitting remaining buffer content for section ${this.currentSection} on finalize.`,
       );
-      eventsToSend.push(
-        ApiResponse.success({ type: 'text_chunk', text: this.buffer }),
-      );
+      // --- Emit final text in chunks ---
+      eventsToSend.push(...emitTextInChunks(this.buffer));
+      // -------------------------------
       // Also close the last section implicitly
       eventsToSend.push(
         ApiResponse.success({
