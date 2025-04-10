@@ -182,7 +182,8 @@ Important Rules:
       const ANALYSIS_END_MARKER = '[ANALYSIS_INFO_END]';
       let analysisBuffer = ''; // Buffer specifically for analysis info
 
-      const subscription = rawStreamFromProvider
+      // Start the subscription but don't need to store the reference
+      rawStreamFromProvider
         .pipe(
           finalize(() => {
             this.logger.log('[V2 Refactored] Raw stream finalized.');
