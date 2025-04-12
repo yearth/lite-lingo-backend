@@ -68,10 +68,10 @@ Generate a JSON object with the following structure, omitting fields that are no
   },
   "explanation": "{Original Word/Phrase} ({General Translation})", // Only for word_or_phrase
   "contextExplanation": "{Explanation of the word/phrase in context, in ${targetLang}}", // Only for word_or_phrase
-  "dictionary": { // Only for word_or_phrase. IMPORTANT: 'definitions' MUST be an array.
-    "definitions": [ // MUST BE an array containing 1 to 3 definition objects. Start with '['.
+  "dictionary": { // Only for word_or_phrase
+    "definitions": [ // Array containing 1 to 3 definition objects
       { "pos": "{Part of Speech}", "def": "{Definition in ${targetLang}}" }
-      // ... up to 2 more definition objects { ... }
+      // ... up to 2 more definitions
     ],
     "examples": [
       { "original": "{Example sentence}", "translation": "{Example translation}" }
@@ -87,7 +87,7 @@ Important Rules:
 - Output **only** the JSON object. Nothing before or after it.
 - Ensure the JSON is valid.
 - Provide information relevant to the analyzed 'inputType'. For example, if it's a sentence, only include 'analysisInfo' and 'translationResult'. If it's a fragment, only include 'analysisInfo' and 'fragmentError'.
-- For 'word_or_phrase', include 'analysisInfo', 'explanation', 'contextExplanation', and 'dictionary' (if definitions/examples are found). The 'dictionary.definitions' field MUST be an array containing between 1 and 3 definition objects. It MUST start with '[' and end with ']'.`;
+- For 'word_or_phrase', include 'analysisInfo', 'explanation', 'contextExplanation', and 'dictionary' (if definitions/examples are found). The 'dictionary.definitions' array should contain between 1 and 3 definitions.`;
 
     return [{ role: 'user', content: promptText }];
   }
