@@ -66,16 +66,19 @@ Generate a JSON object with the following structure, omitting fields that are no
     "inputType": "word_or_phrase" | "sentence" | "fragment",
     "sourceText": "{original text}"
   },
-  "explanation": "{Original Word/Phrase} ({General Translation})", // Only for word_or_phrase
-  "contextExplanation": "{Explanation of the word/phrase in context, in ${targetLang}}", // Only for word_or_phrase
+  "context": { // Only for word_or_phrase
+    "word_translation": "{General Translation in ${targetLang}}",
+    "explanation": "{Explanation of the word/phrase in context, in ${targetLang}}"
+  },
   "dictionary": { // Only for word_or_phrase
-    "definitions": [ // Array containing 1 to 3 definition objects
-      { "pos": "{Part of Speech}", "def": "{Definition in ${targetLang}}" }
-      // ... up to 2 more definitions
-    ],
-    "examples": [
-      { "original": "{Example sentence}", "translation": "{Example translation}" }
-      // ... more examples (try to associate with definitions if possible)
+    "word": "{word}",
+    "phonetic": "{phonetic, if applicable}",
+    "definitions": [ // MUST BE an array with 1-3 objects. Start with '['.
+      {
+        "definition": "{Definition in ${targetLang}}",
+        "example": "{Example sentence (original and translation)}"
+      }
+      // ... potentially 1 or 2 more objects like the one above
     ]
   },
   "translationResult": "{Sentence translation in ${targetLang}, considering context}", // Only for sentence
@@ -86,8 +89,10 @@ Generate a JSON object with the following structure, omitting fields that are no
 Important Rules:
 - Output **only** the JSON object. Nothing before or after it.
 - Ensure the JSON is valid.
-- Provide information relevant to the analyzed 'inputType'. For example, if it's a sentence, only include 'analysisInfo' and 'translationResult'. If it's a fragment, only include 'analysisInfo' and 'fragmentError'.
-- For 'word_or_phrase', include 'analysisInfo', 'explanation', 'contextExplanation', and 'dictionary' (if definitions/examples are found). The 'dictionary.definitions' array should contain between 1 and 3 definitions.`;
+- Provide information relevant to the analyzed 'inputType'.
+  - If 'inputType' is 'sentence', only include 'analysisInfo' and 'translationResult'.
+  - If 'inputType' is 'fragment', only include 'analysisInfo' and 'fragmentError'.
+  - If 'inputType' is 'word_or_phrase', include 'analysisInfo', 'context', and 'dictionary' (if applicable). The 'dictionary.definitions' field MUST be an array containing between 1 and 3 objects, each with 'definition' and 'example' keys. It MUST start with '[' and end with ']'.`;
 
     return [{ role: 'user', content: promptText }];
   }
