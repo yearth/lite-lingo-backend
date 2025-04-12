@@ -1,40 +1,54 @@
-import { HttpStatus, Injectable, Logger } from '@nestjs/common';
-// import { Observable, Subject, throwError } from 'rxjs'; // No longer needed for Subject/throwError
-// import { catchError, finalize } from 'rxjs/operators'; // No longer needed
-// import { AiProviderFactory } from '../ai-provider/ai-provider.factory'; // No longer needed
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { Observable, Subject, throwError } from 'rxjs'; // Import Subject
+import { catchError, finalize } from 'rxjs/operators'; // Import finalize
+import { AiProviderFactory } from '../ai-provider/ai-provider.factory';
 import { ChatMessage } from '../ai-provider/chat-message.interface';
-// import { ApiResponse } from '../common/dto/api-response.dto'; // No longer needed for this service
+import { ApiResponse } from '../common/dto/api-response.dto';
 import { TranslateRequestDto } from './dto/translate-request.dto';
-// --- Vercel AI SDK Imports ---
-import { createDeepSeek } from '@ai-sdk/deepseek'; // Corrected import name
-import { streamText } from 'ai'; // Use streamText instead of streamObject
-import { ReadableStream, TransformStream } from 'node:stream/web'; // Use Node.js streams
-// -----------------------------
+// MarkerStreamProcessor is no longer needed
 
 // Define the structure for the V2 ApiResponse data (Frontend will receive text chunks to build this)
-// This interface might become obsolete or change based on how we handle the final JSON
-// interface FinalJsonResponse { ... } // Keep for reference during prompt building
+interface FinalJsonResponse {
+  analysisInfo?: {
+    inputType: 'word_or_phrase' | 'sentence' | 'fragment';
+    sourceText: string;
+  };
+  explanation?: string; // Basic word/phrase + translation
+  contextExplanation?: string;
+  dictionary?: {
+    definitions: { pos: string; def: string }[];
+    examples: { original: string; translation: string }[];
+  };
+  translationResult?: string;
+  fragmentError?: string; // Error message for fragment
+}
 
 // Define the structure for the SSE events sent to the frontend
-// This interface is now less relevant as we format directly for Vercel's protocol
-// interface ApiResponseV2Data { ... }
+interface ApiResponseV2Data {
+  type: 'text_chunk' | 'error' | 'done'; // Simplified event types
+  text?: string; // For text_chunk
+  payload?: any; // For error, done
+}
+
+// AnalysisInfo is no longer sent as a separate event type
+// interface AnalysisInfoPayload { ... }
 
 @Injectable()
 export class TranslateServiceV2 {
   private readonly logger = new Logger(TranslateServiceV2.name);
 
-  // Remove constructor dependency on AiProviderFactory if directly using createDeepseek
-  constructor() {} // Constructor remains empty
+  constructor(private aiProviderFactory: AiProviderFactory) {}
 
-  // Build the V2 prompt asking for a single JSON output (V2.3 - Updated for new schema)
+  // Build the V2 prompt asking for a single JSON output (V2.3)
   private buildPromptV2(dto: TranslateRequestDto): ChatMessage[] {
     const targetLang = dto.targetLanguage || 'zh-CN';
     const inputText = dto.text;
     const context = dto.context;
 
+    // Note: We rely on the AI's streaming capability to send the JSON structure incrementally.
     let promptText = `You are an expert linguistic analysis and translation assistant. Your task is to analyze the provided "Input Text" within its "Context", determine its type (word, phrase, sentence, fragment), translate it to the "Target Language", and provide additional relevant information.
 
-You MUST respond with a **single, complete JSON string** containing all the analysis and translation results. Do not include any introductory text, explanations, apologies, or markdown formatting outside the final JSON string. The JSON string should represent an object conforming to the structure described below, but you must output only the raw JSON string itself.
+You MUST respond with a **single, complete JSON object** containing all the analysis and translation results. Do not include any introductory text, explanations, apologies, or markdown formatting outside the final JSON object.
 
 Input Text: "${inputText}"\n`;
 
@@ -44,137 +58,192 @@ Input Text: "${inputText}"\n`;
 
     promptText += `Target Language: "${targetLang}"
 
-Generate a JSON string representing an object with the following potential structure. Omit fields that are not applicable based on the input type analysis:
+Generate a JSON object with the following structure, omitting fields that are not applicable based on the input type analysis:
 
-Structure Description:
-- analysisInfo: (object) Contains 'inputType' ('word_or_phrase', 'sentence', or 'fragment') and 'sourceText'.
-- context: (object, optional) Contains 'word_translation' and 'explanation'. Only for 'word_or_phrase'.
-- dictionary: (object, optional) Contains 'word', 'phonetic', and 'definitions' object. Only for 'word_or_phrase'. The 'definitions' object should contain 'definition' and 'example' keys, representing only the *first* definition found.
-- translationResult: (string, optional) The translation. Only for 'sentence'.
-- fragmentError: (string, optional) Error message. Only for 'fragment'.
+\`\`\`json
+{
+  "analysisInfo": {
+    "inputType": "word_or_phrase" | "sentence" | "fragment",
+    "sourceText": "{original text}"
+  },
+  "explanation": "{Original Word/Phrase} ({General Translation})", // Only for word_or_phrase
+  "contextExplanation": "{Explanation of the word/phrase in context, in ${targetLang}}", // Only for word_or_phrase
+  "dictionary": { // Only for word_or_phrase
+    "definitions": [
+      { "pos": "{Part of Speech}", "def": "{Definition in ${targetLang}}" }
+      // ... more definitions
+    ],
+    "examples": [
+      { "original": "{Example sentence}", "translation": "{Example translation}" }
+      // ... more examples (try to associate with definitions if possible)
+    ]
+  },
+  "translationResult": "{Sentence translation in ${targetLang}, considering context}", // Only for sentence
+  "fragmentError": "无法识别或翻译选中的片段..." // Only for fragment
+}
+\`\`\`
 
 Important Rules:
-- Output **ONLY** the raw JSON string. Absolutely **NO** introductory text, explanations, apologies, or markdown formatting (like \`\`\`) before or after the JSON string.
-- The output MUST start directly with the opening curly brace '{' and end directly with the closing curly brace '}'.
-- Ensure the JSON string is valid.
-- Provide information relevant to the analyzed 'inputType'.
-  - If 'inputType' is 'sentence', the JSON string should represent an object with only 'analysisInfo' and 'translationResult'.
-  - If 'inputType' is 'fragment', the JSON string should represent an object with only 'analysisInfo' and 'fragmentError'.
-  - If 'inputType' is 'word_or_phrase', the JSON string should represent an object with 'analysisInfo', 'context', and 'dictionary' (if a definition/example is found). The 'dictionary.definitions' field MUST be an object containing only the first definition and example, not an array. Do not include 'translationResult' or 'fragmentError'.
-- All explanations and definitions within the JSON string should be in the target language: ${targetLang}.`;
+- Output **only** the JSON object. Nothing before or after it.
+- Ensure the JSON is valid.
+- Provide information relevant to the analyzed 'inputType'. For example, if it's a sentence, only include 'analysisInfo' and 'translationResult'. If it's a fragment, only include 'analysisInfo' and 'fragmentError'.
+- For 'word_or_phrase', include 'analysisInfo', 'explanation', 'contextExplanation', and 'dictionary' (if definitions/examples are found).`;
 
     return [{ role: 'user', content: promptText }];
   }
 
   /**
-   * Generates a V2 translation stream using Vercel AI SDK and streamObject,
-   * formatted according to Vercel's SSE protocol.
+   * Generates a V2 translation stream by forwarding raw text chunks.
+   * Frontend is responsible for parsing the streamed JSON.
    * @param dto - The translation request DTO.
-   * @returns A ReadableStream<string> formatted for SSE.
+   * @returns An Observable stream of ApiResponseV2.
    */
-  async generateStreamV2(dto: TranslateRequestDto): Promise<ReadableStream<string>> {
-    // --- Provider Setup ---
-    // Assuming DEEPSEEK_API_KEY is set in environment variables
-    const deepseekApiKey = process.env.DEEPSEEK_API_KEY;
-    if (!deepseekApiKey) {
-      this.logger.error('[V2 Vercel SDK] DEEPSEEK_API_KEY environment variable is not set.');
-      // Return error stream immediately
-      const errorPayload = { code: HttpStatus.SERVICE_UNAVAILABLE, msg: 'DeepSeek API key not configured.' };
-      const errorSse = `data: ${JSON.stringify(errorPayload)}\n\n`;
-      return new ReadableStream<string>({ // Ensure it returns a string stream
-        start(controller) {
-          controller.enqueue(errorSse); // Enqueue the string directly
-          controller.close();
-        },
-      });
+  generateStreamV2(
+    dto: TranslateRequestDto,
+  ): Observable<ApiResponse<ApiResponseV2Data>> {
+    const providerName = dto.provider || 'openrouter';
+    const requestedModel = dto.model;
+    this.logger.log(
+      `[V2 Forwarding] Attempting translation for provider: ${providerName}, model: ${requestedModel || 'default'}`,
+    );
+
+    const provider = this.aiProviderFactory.getProvider(providerName);
+    if (!provider) {
+      this.logger.error(
+        `[V2 Forwarding] AI Provider "${providerName}" is not available.`,
+      );
+      return throwError(
+        () =>
+          new HttpException(
+            `AI Provider "${providerName}" is not available or configured.`,
+            HttpStatus.SERVICE_UNAVAILABLE,
+          ),
+      );
     }
 
-    const deepseek = createDeepSeek({ apiKey: deepseekApiKey }); // Corrected function name
-    const modelName = dto.model || 'deepseek-chat'; // Use requested or default
-    this.logger.log(
-      `[V2 Vercel SDK] Attempting translation with DeepSeek model: ${modelName}`,
-    );
-    const model = deepseek(modelName);
-    // --------------------
+    // Determine model
+    let finalModel: string;
+    if (requestedModel) {
+      finalModel = requestedModel;
+    } else {
+      switch (providerName.toLowerCase()) {
+        case 'deepseek':
+          finalModel = 'deepseek-chat';
+          break;
+        case 'openrouter':
+        default:
+          finalModel = 'deepseek/deepseek-chat-v3-0324:free';
+          break;
+      }
+      this.logger.log(
+        `[V2 Forwarding] No model specified for ${providerName}, using default: ${finalModel}`,
+      );
+    }
 
     const messages = this.buildPromptV2(dto);
 
+    // Use a Subject to manually control the output stream
+    const subject = new Subject<ApiResponse<ApiResponseV2Data>>();
+    let streamErrored = false;
+
     try {
-      this.logger.log(`[V2 Vercel SDK] Calling streamText with model ${modelName}.`);
-
-      const result = await streamText({ // Use streamText
-        model: model,
-        // schema: TranslationResultSchema, // Schema not used with streamText
-        prompt: messages[0].content, // Assuming single user message for simplicity
-        // messages: messages, // Alternatively pass the full array if needed
-      });
-
-      // --- SSE Formatting Stream ---
-      // const data = new StreamData(); // Vercel AI SDK helper - Deprecated and not used here
-
-      // Append final message (optional, can be handled by [DONE])
-      // data.append({ message: 'Stream completed successfully' });
-
-      // Pipe the text stream through a transformer to format SSE messages
-      // Explicitly cast the input stream type for pipeThrough
-      const sseStream: ReadableStream<string> = (result.textStream as ReadableStream<string>).pipeThrough(
-        new TransformStream({ // Keep TS inference for the TransformStream itself
-          transform(chunk: string, controller) { // Chunk is now a string fragment
-            // Format according to Vercel AI SDK protocol (or your desired format)
-            const payload = {
-              code: 0,
-              msg: '',
-              data: {
-                type: 'text', // Vercel's type for text chunks
-                model: modelName,
-                text: chunk, // Send the raw text chunk
-              },
-            };
-            controller.enqueue(`data: ${JSON.stringify(payload)}\n\n`);
-          },
-          flush(controller) {
-             // Send the [DONE] marker at the end of the stream
-             controller.enqueue(`data: [DONE]\n\n`);
-             // data.close(); // No longer needed as StreamData is removed
-          }
-        }),
+      this.logger.log(
+        `[V2 Forwarding] Calling ${providerName} provider (raw stream) with model ${finalModel}.`,
       );
-      // -----------------------------
+      const rawStreamFromProvider = provider.generateRawChatStream(
+        messages,
+        finalModel,
+      );
 
-      // Return the formatted SSE stream
-      return sseStream; // Return the raw transformed stream
+      // Simplified logic: Directly forward chunks
+      rawStreamFromProvider
+        .pipe(
+          finalize(() => {
+            this.logger.log('[V2 Forwarding] Raw stream finalized.');
+            if (!subject.closed) {
+              // Send the final 'done' event ONLY if the stream completed successfully
+              if (!streamErrored) {
+                subject.next(
+                  ApiResponse.success<ApiResponseV2Data>(
+                    { type: 'done', payload: { status: 'completed' } },
+                    'Stream ended',
+                    '0',
+                  ),
+                );
+              }
+              subject.complete();
+            }
+          }),
+          catchError((err) => {
+            streamErrored = true;
+            this.logger.error(
+              `[V2 Forwarding] Error during raw stream generation for ${providerName}: ${err.message}`,
+              err.stack,
+            );
+            if (!subject.closed) {
+              const errorPayload: ApiResponseV2Data = {
+                type: 'error',
+                payload: {
+                  message:
+                    err.message ||
+                    'An unexpected error occurred during V2 streaming',
+                },
+              };
+              subject.next(
+                ApiResponse.error<ApiResponseV2Data>(
+                  err.message,
+                  'STREAM_GENERATION_ERROR',
+                  errorPayload,
+                ) as ApiResponse<ApiResponseV2Data>,
+              );
+              subject.next(
+                ApiResponse.success<ApiResponseV2Data>(
+                  { type: 'done', payload: { status: 'failed' } },
+                  'Stream ended with error',
+                  '0',
+                ),
+              );
+              subject.complete();
+            }
+            return throwError(() => err); // Propagate error
+          }),
+        )
+        .subscribe({
+          next: (chunk: string) => {
+            if (subject.closed) return;
+            // Directly forward the raw text chunk
+            if (chunk && chunk.length > 0) {
+               subject.next(ApiResponse.success({ type: 'text_chunk', text: chunk }));
+            }
+          },
+          error: (err) => {
+            // Handled by catchError
+            this.logger.error('[V2 Forwarding] Raw stream subscription error:', err);
+          },
+          complete: () => {
+            // Handled by finalize
+            this.logger.log('[V2 Forwarding] Raw stream subscription completed.');
+          },
+        });
 
+      // Return the subject as an Observable
+      return subject.asObservable();
     } catch (error) {
       this.logger.error(
-        `[V2 Vercel SDK] Error during streamObject generation: ${error.message}`,
-        error.stack,
+        `[V2 Forwarding] Error invoking generateRawChatStream for provider ${providerName}:`,
+        error,
       );
-
-      // --- Error SSE Formatting ---
-      // Determine error code (e.g., based on error type)
-      const errorCode = error.status || HttpStatus.INTERNAL_SERVER_ERROR; // Example
-      const errorMessage = error.message || 'AI stream generation failed.';
-      const errorPayload = {
-        code: errorCode,
-        msg: errorMessage,
-      };
-      const errorSse = `data: ${JSON.stringify(errorPayload)}\n\n`;
-
-      // Return a stream that emits only the error message string
-      const errorStream = new ReadableStream<string>({
-        start(controller) {
-          controller.enqueue(errorSse); // Enqueue the string directly
-          controller.close();
-        },
-      });
-      return errorStream;
-      // -----------------------------
-
-      // Or rethrow if Controller should handle HTTP exception
-      // throw new HttpException(
-      //   `[V2 Vercel SDK] Failed to initiate stream with DeepSeek. ${error.message}`,
-      //   HttpStatus.INTERNAL_SERVER_ERROR,
-      // );
+      if (!subject.closed) {
+        subject.error(error);
+        subject.complete();
+      }
+      return throwError(
+        () =>
+          new HttpException(
+            `[V2 Forwarding] Failed to initiate raw stream with provider ${providerName}.`,
+            HttpStatus.INTERNAL_SERVER_ERROR,
+          ),
+      );
     }
   }
 }
