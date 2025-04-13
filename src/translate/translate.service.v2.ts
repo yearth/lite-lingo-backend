@@ -3,11 +3,13 @@ import { Observable, Subject, throwError } from 'rxjs'; // Import Subject
 import { catchError, finalize } from 'rxjs/operators'; // Import finalize
 import { AiProviderFactory } from '../ai-provider/ai-provider.factory';
 import { ChatMessage } from '../ai-provider/chat-message.interface';
-import { ApiResponse } from '../common/dto/api-response.dto';
+// ApiResponse and ApiResponseV2Data are no longer needed for the stream output format
+// import { ApiResponse } from '../common/dto/api-response.dto';
+// import { ApiResponseV2Data } from './dto/api-response-v2-data.dto';
 import { TranslateRequestDto } from './dto/translate-request.dto';
 // MarkerStreamProcessor is no longer needed
 
-// Define the structure for the V2 ApiResponse data (Frontend will receive text chunks to build this)
+// Define the structure for the final JSON response expected from the AI
 interface FinalJsonResponse {
   analysisInfo?: {
     inputType: 'word_or_phrase' | 'sentence' | 'fragment';
@@ -22,15 +24,6 @@ interface FinalJsonResponse {
   translationResult?: string;
   fragmentError?: string; // Error message for fragment
 }
-
-// Define the structure for the SSE events sent to the frontend
-interface ApiResponseV2Data {
-  type: 'text_chunk' | 'error' | 'done'; // Simplified event types
-  text?: string; // For text_chunk
-  payload?: any; // For error, done
-}
-
-// AnalysisInfo is no longer sent as a separate event type
 // interface AnalysisInfoPayload { ... }
 
 @Injectable()
@@ -60,7 +53,6 @@ Input Text: "${inputText}"\n`;
 
 Generate a JSON object with the following structure, omitting fields that are not applicable based on the input type analysis:
 
-\`\`\`json
 {
   "analysisInfo": {
     "inputType": "word_or_phrase" | "sentence" | "fragment",
@@ -84,28 +76,30 @@ Generate a JSON object with the following structure, omitting fields that are no
   "translationResult": "{Sentence translation in ${targetLang}, considering context}", // Only for sentence
   "fragmentError": "无法识别或翻译选中的片段..." // Only for fragment
 }
-\`\`\`
 
 Important Rules:
-- Output **only** the JSON object. Nothing before or after it.
+- Output **only** the raw JSON object itself. Your entire response **must** start directly with '{' and end directly with '}'.
+- **CRITICAL:** Do **NOT** wrap the JSON object in markdown code fences (like \`\`\`json ... \`\`\`). The response must be pure JSON, nothing else.
 - Ensure the JSON is valid.
 - Provide information relevant to the analyzed 'inputType'.
   - If 'inputType' is 'sentence', only include 'analysisInfo' and 'translationResult'.
   - If 'inputType' is 'fragment', only include 'analysisInfo' and 'fragmentError'.
-  - If 'inputType' is 'word_or_phrase', include 'analysisInfo', 'context', and 'dictionary' (if applicable). The 'dictionary.definitions' field MUST be an array containing between 1 and 3 objects, each with 'definition' and 'example' keys. It MUST start with '[' and end with ']'.`;
+  - If 'inputType' is 'sentence', only include 'analysisInfo' and 'translationResult'.
+  - If 'inputType' is 'fragment', only include 'analysisInfo' and 'fragmentError'.
+  - If 'inputType' is 'word_or_phrase', include 'analysisInfo', 'context', and 'dictionary' (if applicable). The 'dictionary.definitions' field MUST be an array containing between 1 and 3 objects, each with 'definition' and 'example' keys. It MUST start with '[' and end with ']'.
+`; // End of template literal
 
     return [{ role: 'user', content: promptText }];
   }
 
   /**
-   * Generates a V2 translation stream by forwarding raw text chunks.
-   * Frontend is responsible for parsing the streamed JSON.
+   * Generates a V2 translation stream by forwarding raw text chunks,
+   * ending with '[DONE]' on success or '[ERROR]' on failure.
+   * Frontend is responsible for parsing the streamed JSON chunks.
    * @param dto - The translation request DTO.
-   * @returns An Observable stream of ApiResponseV2.
+   * @returns An Observable stream of strings (text chunks or markers).
    */
-  generateStreamV2(
-    dto: TranslateRequestDto,
-  ): Observable<ApiResponse<ApiResponseV2Data>> {
+  generateStreamV2(dto: TranslateRequestDto): Observable<string> {
     const providerName = dto.provider || 'openrouter';
     const requestedModel = dto.model;
     this.logger.log(
@@ -147,8 +141,8 @@ Important Rules:
 
     const messages = this.buildPromptV2(dto);
 
-    // Use a Subject to manually control the output stream
-    const subject = new Subject<ApiResponse<ApiResponseV2Data>>();
+    // Use a Subject to manually control the output stream (now emitting strings)
+    const subject = new Subject<string>();
     let streamErrored = false;
 
     try {
@@ -166,17 +160,11 @@ Important Rules:
           finalize(() => {
             this.logger.log('[V2 Forwarding] Raw stream finalized.');
             if (!subject.closed) {
-              // Send the final 'done' event ONLY if the stream completed successfully
+              // Send the final '[DONE]' marker ONLY if the stream completed successfully
               if (!streamErrored) {
-                subject.next(
-                  ApiResponse.success<ApiResponseV2Data>(
-                    { type: 'done', payload: { status: 'completed' } },
-                    'Stream ended',
-                    '0',
-                  ),
-                );
+                subject.next('[DONE]');
               }
-              subject.complete();
+              subject.complete(); // Complete the observable stream
             }
           }),
           catchError((err) => {
@@ -186,42 +174,35 @@ Important Rules:
               err.stack,
             );
             if (!subject.closed) {
-              const errorPayload: ApiResponseV2Data = {
-                type: 'error',
-                payload: {
-                  message:
-                    err.message ||
-                    'An unexpected error occurred during V2 streaming',
-                },
-              };
-              subject.next(
-                ApiResponse.error<ApiResponseV2Data>(
-                  err.message,
-                  'STREAM_GENERATION_ERROR',
-                  errorPayload,
-                ) as ApiResponse<ApiResponseV2Data>,
-              );
-              subject.next(
-                ApiResponse.success<ApiResponseV2Data>(
-                  { type: 'done', payload: { status: 'failed' } },
-                  'Stream ended with error',
-                  '0',
-                ),
-              );
-              subject.complete();
+              // Send the '[ERROR]' marker
+              subject.next('[ERROR]');
+              subject.complete(); // Complete the observable stream even on error
             }
-            return throwError(() => err); // Propagate error
+            // It's important to still propagate the error for potential higher-level handling
+            // but the SSE stream itself is considered 'complete' with the [ERROR] marker.
+            return throwError(() => err);
           }),
         )
         .subscribe({
           next: (chunk: string) => {
             if (subject.closed) return;
-            // Directly forward the raw text chunk
+            // Wrap the raw text chunk in the standard JSON structure
             if (chunk && chunk.length > 0) {
-               subject.next(ApiResponse.success({ type: 'text_chunk', text: chunk }));
+              this.logger.debug(`[V2 Raw Chunk] Received: ${chunk}`); // Add logging for raw chunk
+              const wrappedData = {
+                code: 0,
+                msg: '',
+                data: {
+                  type: 'text',
+                  model: finalModel, // Use the determined model name
+                  text: chunk,
+                },
+              };
+              subject.next(JSON.stringify(wrappedData)); // Send the stringified JSON
             }
           },
           error: (err) => {
+            // Error handling is now primarily done in catchError
             // Handled by catchError
             this.logger.error('[V2 Forwarding] Raw stream subscription error:', err);
           },
