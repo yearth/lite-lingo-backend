@@ -1,6 +1,7 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
-import { Observable, Subject, throwError } from 'rxjs'; // Import Subject
-import { catchError, finalize } from 'rxjs/operators'; // Import finalize
+import { ConfigService } from '@nestjs/config'; // Import ConfigService
+import { Observable, Subject, concat, from, of, throwError, timer } from 'rxjs'; // Import Subject, of, concat, throwError, from, timer
+import { catchError, concatMap, finalize, map } from 'rxjs/operators'; // Import finalize, map, concatMap
 import { AiProviderFactory } from '../ai-provider/ai-provider.factory';
 import { ChatMessage } from '../ai-provider/chat-message.interface';
 // ApiResponse and ApiResponseV2Data are no longer needed for the stream output format
@@ -10,38 +11,71 @@ import { TranslateRequestDto } from './dto/translate-request.dto';
 // MarkerStreamProcessor is no longer needed
 
 // Define the structure for the final JSON response expected from the AI
-interface FinalJsonResponse {
-  analysisInfo?: {
-    inputType: 'word_or_phrase' | 'sentence' | 'fragment';
-    sourceText: string;
-  };
-  explanation?: string; // Basic word/phrase + translation
-  contextExplanation?: string;
-  dictionary?: {
-    definitions: { pos: string; def: string }[];
-    examples: { original: string; translation: string }[];
-  };
-  translationResult?: string;
-  fragmentError?: string; // Error message for fragment
+// Note: These interfaces are for documentation/typing, AI might not strictly adhere.
+interface WordPhraseContext {
+  word_translation: string;
+  explanation: string;
 }
-// interface AnalysisInfoPayload { ... }
+interface DictionaryDefinition {
+  pos: string;
+  def: string;
+  example: {
+    orig: string;
+    trans: string;
+  };
+}
+interface DictionaryInfo {
+  word: string;
+  phonetic: string | null;
+  definitions: DictionaryDefinition[];
+}
+interface WordPhraseResponse {
+  context: WordPhraseContext;
+  dictionary: DictionaryInfo;
+}
+
+// Define Mock data as an object first
+const mockDataObject = {
+  context: {
+    word_translation: "配置 (Mock)",
+    explanation: "在模拟上下文中，'configure'指的是对软件或系统进行设置或调整。"
+  },
+  dictionary: {
+    word: "configure (Mock)",
+    phonetic: "/kənˈfɪɡjər/",
+    definitions: [
+      {
+        pos: "动词",
+        def: "配置，设定 (Mock)",
+        example: {
+          orig: "You need to configure the software (Mock).",
+          trans: "你需要配置这个软件 (Mock)。"
+        }
+      }
+    ]
+  }
+};
+// Convert the object to a compact JSON string
+const MOCK_WORD_RESPONSE_STRING = JSON.stringify(mockDataObject);
+
 
 @Injectable()
 export class TranslateServiceV2 {
   private readonly logger = new Logger(TranslateServiceV2.name);
 
-  constructor(private aiProviderFactory: AiProviderFactory) {}
+  constructor(
+    private aiProviderFactory: AiProviderFactory,
+    private configService: ConfigService, // Inject ConfigService
+  ) {}
 
-  // Build the V2 prompt asking for a single JSON output (V2.3)
+  // Build the V2 prompt asking for either JSON (word/phrase) or plain text (sentence)
   private buildPromptV2(dto: TranslateRequestDto): ChatMessage[] {
     const targetLang = dto.targetLanguage || 'zh-CN';
     const inputText = dto.text;
     const context = dto.context;
 
-    // Note: We rely on the AI's streaming capability to send the JSON structure incrementally.
-    let promptText = `You are an expert linguistic analysis and translation assistant. Your task is to analyze the provided "Input Text" within its "Context", determine its type (word, phrase, sentence, fragment), translate it to the "Target Language", and provide additional relevant information.
-
-You MUST respond with a **single, complete JSON object** containing all the analysis and translation results. Do not include any introductory text, explanations, apologies, or markdown formatting outside the final JSON object.
+    // Construct the prompt string carefully, avoiding problematic characters inside the template literal
+    let promptText = `You are an expert linguistic analysis and translation assistant. Your task is to analyze the provided "Input Text" within its "Context" and translate it to the "Target Language".
 
 Input Text: "${inputText}"\n`;
 
@@ -51,43 +85,72 @@ Input Text: "${inputText}"\n`;
 
     promptText += `Target Language: "${targetLang}"
 
-Generate a JSON object with the following structure, omitting fields that are not applicable based on the input type analysis:
+Analyze the "Input Text":
+1. Determine if the input is a **single word or a common phrase** suitable for dictionary lookup.
+2. If it is NOT a single word or common phrase, treat it as a **sentence** that needs translation.
 
+Based on the analysis, provide your response following **ONLY ONE** of these formats:
+
+**Format A: If Input is a Word or Phrase**
+- Your **entire response** MUST be a **single, complete, valid JSON string**.
+- The JSON structure MUST be exactly as follows:
 {
-  "analysisInfo": {
-    "inputType": "word_or_phrase" | "sentence" | "fragment",
-    "sourceText": "{original text}"
-  },
-  "context": { // Only for word_or_phrase
+  "context": {
     "word_translation": "{General Translation in ${targetLang}}",
     "explanation": "{Explanation of the word/phrase in context, in ${targetLang}}"
   },
-  "dictionary": { // Only for word_or_phrase
-    "word": "{word}",
-    "phonetic": "{phonetic, if applicable}",
-    "definitions": [ // MUST BE an array with 1-3 objects. Start with '['.
+  "dictionary": {
+    "word": "{original word/phrase}",
+    "phonetic": "{phonetic, if applicable, otherwise null}",
+    "definitions": [
       {
-        "definition": "{Definition in ${targetLang}}",
-        "example": "{Example sentence (original and translation)}"
+        "pos": "{part of speech, e.g., '动词'}",
+        "def": "{Definition in ${targetLang}}",
+        "example": {
+          "orig": "{Example sentence in original language}",
+          "trans": "{Example sentence translation in ${targetLang}}"
+        }
       }
-      // ... potentially 1 or 2 more objects like the one above
+      // Include 1 to 3 relevant definitions with examples.
     ]
+  }
+}
+- **CRITICAL:** Output **only** the raw JSON string itself. Your response **MUST** start directly with '{' and end directly with '}'.
+- **ABSOLUTELY FORBIDDEN:** Do **NOT** wrap the JSON string in Markdown code fences (like \`\`\`json ... \`\`\`). The response must be pure JSON.
+- **REPEAT:** The output must be **ONLY** the JSON string, nothing before the opening '{', nothing after the closing '}', and no \`\`\`json or \`\`\` markers.
+
+**Format B: If Input is a Sentence (or anything else)**
+- Your **entire response** MUST be the **plain text translation** of the sentence into the "Target Language", considering the "Context".
+- Do **NOT** include any JSON structure, quotes, labels, or any other text besides the translation itself.
+
+Example for Format A (Input: "configure"):
+(Your output should look like this, starting with { and ending with }):
+{
+  "context": {
+    "word_translation": "配置",
+    "explanation": "在上下文中，'configure'指的是对软件或系统进行设置或调整。"
   },
-  "translationResult": "{Sentence translation in ${targetLang}, considering context}", // Only for sentence
-  "fragmentError": "无法识别或翻译选中的片段..." // Only for fragment
+  "dictionary": {
+    "word": "configure",
+    "phonetic": "/kənˈfɪɡjər/",
+    "definitions": [
+      {{"type":"text","model":"deepseek/deepseek-chat-v3-0324:free","text":"为"}
+        "pos": "动词",
+        "def": "配置，设定",
+        "example": {
+          "orig": "You need to configure the software.",
+          "trans": "你需要配置这个软件。"
+        }
+      }
+    ]
+  }
 }
 
-Important Rules:
-- Output **only** the raw JSON object itself. Your entire response **must** start directly with '{' and end directly with '}'.
-- **CRITICAL:** Do **NOT** wrap the JSON object in markdown code fences (like \`\`\`json ... \`\`\`). The response must be pure JSON, nothing else.
-- Ensure the JSON is valid.
-- Provide information relevant to the analyzed 'inputType'.
-  - If 'inputType' is 'sentence', only include 'analysisInfo' and 'translationResult'.
-  - If 'inputType' is 'fragment', only include 'analysisInfo' and 'fragmentError'.
-  - If 'inputType' is 'sentence', only include 'analysisInfo' and 'translationResult'.
-  - If 'inputType' is 'fragment', only include 'analysisInfo' and 'fragmentError'.
-  - If 'inputType' is 'word_or_phrase', include 'analysisInfo', 'context', and 'dictionary' (if applicable). The 'dictionary.definitions' field MUST be an array containing between 1 and 3 objects, each with 'definition' and 'example' keys. It MUST start with '[' and end with ']'.
-`; // End of template literal
+Example for Format B (Input: "Hello world"):
+(Your output should look like this, just the plain text):
+你好，世界
+
+Choose **only one format** based on your analysis and provide **only** the specified output.`;
 
     return [{ role: 'user', content: promptText }];
   }
@@ -100,7 +163,38 @@ Important Rules:
    * @returns An Observable stream of strings (text chunks or markers).
    */
   generateStreamV2(dto: TranslateRequestDto): Observable<string> {
-    const providerName = dto.provider || 'openrouter';
+    // Check mock environment variable
+    const isMockEnabled = this.configService.get<string>('TRANSLATE_MOCK_ENABLED') === 'true';
+
+    if (isMockEnabled) {
+      this.logger.log('[V2 Mock] Mock mode enabled. Returning mock data stream.');
+      const mockModel = 'mock-model';
+      // Construct the mock stream: metadata, mock data, done marker
+      const metadata = {
+        code: 0,
+        msg: '',
+        data: { type: 'text', model: mockModel },
+      };
+
+      // Chunk the mock string
+      const chunkSize = 10; // Define chunk size
+      const chunks: string[] = [];
+      for (let i = 0; i < MOCK_WORD_RESPONSE_STRING.length; i += chunkSize) {
+        chunks.push(MOCK_WORD_RESPONSE_STRING.substring(i, i + chunkSize));
+      }
+
+      // Use concat to send events sequentially with delay between chunks
+      return concat(
+        of(JSON.stringify(metadata)), // 1. Send metadata
+        from(chunks).pipe( // 2. Stream each chunk from the array
+          concatMap(chunk => timer(10).pipe(map(() => chunk))) // Add delay between chunks
+        ),
+        of('[DONE]') // 3. Send done marker
+      );
+    }
+
+    // --- Original AI Logic ---
+    const providerName = dto.provider || 'deepseek'; // Default provider
     const requestedModel = dto.model;
     this.logger.log(
       `[V2 Forwarding] Attempting translation for provider: ${providerName}, model: ${requestedModel || 'default'}`,
@@ -131,7 +225,9 @@ Important Rules:
           break;
         case 'openrouter':
         default:
-          finalModel = 'deepseek/deepseek-chat-v3-0324:free';
+          // Use a model known to be good at following JSON instructions if possible
+          // finalModel = 'deepseek/deepseek-chat-v3-0324:free'; // Reverted default model for openrouter
+          finalModel = 'deepseek-chat'; // Fallback to a default model
           break;
       }
       this.logger.log(
@@ -154,10 +250,12 @@ Important Rules:
         finalModel,
       );
 
-      // Simplified logic: Directly forward chunks
+      let isFirstChunk = true; // Flag to send metadata only once
+
+      // Send initial metadata and then forward raw chunks
       rawStreamFromProvider
         .pipe(
-          finalize(() => {
+          finalize(() => { // Logic for [DONE] remains similar
             this.logger.log('[V2 Forwarding] Raw stream finalized.');
             if (!subject.closed) {
               // Send the final '[DONE]' marker ONLY if the stream completed successfully
@@ -167,7 +265,7 @@ Important Rules:
               subject.complete(); // Complete the observable stream
             }
           }),
-          catchError((err) => {
+          catchError((err) => { // Logic for [ERROR] remains similar
             streamErrored = true;
             this.logger.error(
               `[V2 Forwarding] Error during raw stream generation for ${providerName}: ${err.message}`,
@@ -186,29 +284,33 @@ Important Rules:
         .subscribe({
           next: (chunk: string) => {
             if (subject.closed) return;
-            // Wrap the raw text chunk in the standard JSON structure
-            if (chunk && chunk.length > 0) {
-              this.logger.debug(`[V2 Raw Chunk] Received: ${chunk}`); // Add logging for raw chunk
-              const wrappedData = {
+
+            if (isFirstChunk) {
+              // Send metadata first
+              const metadata = {
                 code: 0,
                 msg: '',
                 data: {
-                  type: 'text',
-                  model: finalModel, // Use the determined model name
-                  text: chunk,
+                  type: 'text', // Indicate this is metadata + text stream start
+                  model: finalModel,
+                  // Add any other relevant metadata here if needed
                 },
               };
-              subject.next(JSON.stringify(wrappedData)); // Send the stringified JSON
+              subject.next(JSON.stringify(metadata));
+              isFirstChunk = false; // Don't send metadata again
+            }
+
+            // Send the raw chunk directly
+            if (chunk && chunk.length > 0) {
+               // this.logger.debug(`[V2 Raw Chunk] Sending: ${chunk}`); // Optional log
+               subject.next(chunk); // Send raw chunk
             }
           },
-          error: (err) => {
-            // Error handling is now primarily done in catchError
-            // Handled by catchError
-            this.logger.error('[V2 Forwarding] Raw stream subscription error:', err);
+          error: (err) => { // Error handling done in catchError
+             this.logger.error('[V2 Forwarding] Raw stream subscription error:', err);
           },
-          complete: () => {
-            // Handled by finalize
-            this.logger.log('[V2 Forwarding] Raw stream subscription completed.');
+          complete: () => { // Completion handling done in finalize
+             this.logger.log('[V2 Forwarding] Raw stream subscription completed.');
           },
         });
 
