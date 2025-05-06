@@ -1,59 +1,35 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
-import { Observable, from, throwError } from 'rxjs'; // Import 'from'
-import { catchError, map } from 'rxjs/operators'; // Import operators (add map back)
+import { ConfigService } from '@nestjs/config'; // Import ConfigService
+import { Observable, Subject, concat, from, of, throwError, timer } from 'rxjs'; // Import necessary RxJS features
+import { catchError, concatMap, finalize, map } from 'rxjs/operators'; // Import necessary RxJS operators
 import { AiProviderFactory } from '../ai-provider/ai-provider.factory';
 import { ChatMessage } from '../ai-provider/chat-message.interface';
-import { ApiResponse } from '../common/dto/api-response.dto';
-import { StreamEventPayload } from '../common/dto/stream-event-payload.dto';
+// ApiResponse and StreamEventPayload are no longer needed for this simplified version
+// import { ApiResponse } from '../common/dto/api-response.dto';
+// import { StreamEventPayload } from '../common/dto/stream-event-payload.dto';
 import { TranslateRequestDto } from './dto/translate-request.dto';
 
-// Define interfaces for expected AI JSON response structures (These are for documentation/typing, AI returns raw JSON)
-interface AiWordResponsePayload {
-  inputType: 'word_or_phrase';
-  sourceText: string;
-}
-interface AiContextExplanationPayload {
-  text: string;
-}
-interface AiDictionaryStartPayload {
-  word: string;
-  translation: string;
-  phonetic: string | null;
-}
-interface AiDefinitionPayload {
-  pos: string;
-  def: string;
-}
-interface AiExamplePayload {
-  original: string;
-  translation: string;
-}
-interface AiTranslationResultPayload {
-  text: string;
-}
-interface AiFragmentErrorPayload {
-  message: string;
-  sourceText: string;
-}
-// No specific payload needed for dictionary_end or done
+// Mock data (optional, can be removed if mock logic is fully removed or kept for testing)
+const MOCK_EXPLANATION_STRING = "在此上下文中，'word' 指的是 模拟含义。";
+const MOCK_TRANSLATION_STRING = "这是一个模拟句子翻译。";
 
 @Injectable()
-export class TranslateService {
+export class TranslateService { // Renamed from TranslateServiceV2 back to TranslateService
   private readonly logger = new Logger(TranslateService.name);
 
-  // Inject the AiProviderFactory
-  constructor(private aiProviderFactory: AiProviderFactory) {}
+  // Inject the AiProviderFactory and ConfigService
+  constructor(
+    private aiProviderFactory: AiProviderFactory,
+    private configService: ConfigService, // Inject ConfigService
+  ) {}
 
-  // Build the prompt for AI analysis and translation (JSON Lines output)
+  // Build the new simplified prompt
   private buildPrompt(dto: TranslateRequestDto): ChatMessage[] {
-    const targetLang = dto.targetLanguage || 'zh-CN'; // Default to Chinese
+    const targetLang = dto.targetLanguage || 'zh-CN';
     const inputText = dto.text;
     const context = dto.context;
 
-    // Base prompt structure for JSON Lines output
-    let promptText = `You are an expert linguistic analysis and translation assistant for a Chrome extension. Your task is to analyze the provided "Input Text" within its "Context", determine its type (word, phrase, sentence, fragment), translate it to the "Target Language", and provide additional relevant information.
-
-You MUST respond by **streaming** a sequence of **JSON objects**, with **each JSON object on a new line**. Each JSON object represents a specific piece of information or an event. Do not include any introductory text, explanations, or markdown formatting outside of the JSON objects.
+    let promptText = `You are a translation assistant. Analyze the "Input Text" and "Context" (if provided).
 
 Input Text: "${inputText}"\n`;
 
@@ -63,67 +39,60 @@ Input Text: "${inputText}"\n`;
 
     promptText += `Target Language: "${targetLang}"
 
-Follow these steps:
-1. Analyze the "Input Text" to determine its type: "word", "phrase", "sentence", or "fragment".
-2. Stream the JSON objects line by line according to the identified type and the schemas below.
-3. Ensure the translation and explanations consider the provided "Context".
+Instructions:
+1. If the "Input Text" is a single word or a common phrase AND "Context" is provided, respond ONLY with the following formatted text:
+   "在此上下文中，'${inputText}' 指的是 {meaning of the input text in the provided context in ${targetLang}}"
+2. Otherwise (if input is a sentence, fragment, or a word/phrase without context), respond ONLY with the direct translation of the "Input Text" into the "Target Language".
 
-JSON Line Schemas (Stream one JSON object per line):
+CRITICAL: Your entire response must be ONLY the explanation text (case 1) or ONLY the translation text (case 2). Do NOT include any other introductory text, labels, quotes, or formatting.`;
 
-If Input Text is a SINGLE WORD or a standard PHRASE, stream these JSON objects sequentially:
-{"type": "analysis_info", "payload": {"inputType": "word_or_phrase", "sourceText": "{original word/phrase}"}}
-{"type": "context_explanation", "payload": {"text": "在这个上下文中，'{original word/phrase}' 表示 {meaning in context in target language}。"}}
-{"type": "dictionary_start", "payload": {"word": "{original word/phrase}", "translation": "{general translation}", "phonetic": "{phonetic or null}"}}
-For EACH definition found, stream:
-{"type": "definition", "payload": {"pos": "{part of speech}", "def": "{definition in target language}"}}
-For EACH corresponding example (if available), stream:
-{"type": "example", "payload": {"original": "{example sentence}", "translation": "{example translation}"}}
-After all definitions/examples, stream:
-{"type": "dictionary_end"}
-Fallback for uncommon word/phrase: If dictionary info is unavailable, after dictionary_start, stream only dictionary_end.
-
-If Input Text is a complete SENTENCE, stream these JSON objects sequentially:
-{"type": "analysis_info", "payload": {"inputType": "sentence", "sourceText": "{original sentence}"}}
-{"type": "translation_result", "payload": {"text": "{sentence translation in target language, considering context}"}}
-
-If Input Text is an INCOMPLETE FRAGMENT or cannot be meaningfully interpreted/translated, stream ONLY this JSON object:
-{"type": "fragment_error", "payload": {"message": "无法识别或翻译选中的片段，请尝试选择完整的单词、短语或句子。", "sourceText": "{original fragment}"}}
-
-Finally, after all other relevant JSON objects have been streamed, stream the 'done' signal:
-{"type": "done"}
-
-Important Rules:
-- Output **each** JSON object on a **new line**.
-- Ensure each line contains a **single, complete, valid** JSON object.
-- Do **not** add any text or formatting before, after, or between the JSON lines.
-- For 'word_or_phrase', stream the components ('dictionary_start', 'definition', 'example', 'dictionary_end') separately.
-- For 'fragment_error', stream **only** that single JSON line and then the 'done' line.
-- Always end the entire stream with the \`{"type": "done"}\` JSON line.`; // Escaped backtick here
-
-    // Return the message array format expected by the providers
     return [{ role: 'user', content: promptText }];
   }
 
   /**
-   * Generates a translation stream wrapped in ApiResponse structure.
+   * Generates a stream of raw translation/explanation text chunks.
    * @param dto - The translation request DTO containing text, provider, model, etc.
-   * @returns An Observable stream of ApiResponse containing StreamEventPayload.
+   * @returns An Observable stream of strings (text chunks or markers like [DONE]/[ERROR]).
    */
-  generateStream(
-    dto: TranslateRequestDto,
-  ): Observable<ApiResponse<StreamEventPayload<any>>> {
-    const providerName = dto.provider || 'openrouter'; // Default to 'openrouter'
-    const requestedModel = dto.model;
+  generateStream(dto: TranslateRequestDto): Observable<string> {
+    // Check mock environment variable (keeping mock logic for now, can be removed later)
+    const isMockEnabled = this.configService.get<string>('TRANSLATE_MOCK_ENABLED') === 'true';
 
+    if (isMockEnabled) {
+      this.logger.log('[V1 Mock] Mock mode enabled. Returning mock data stream.');
+      const mockModel = 'mock-model';
+      // Determine if mock should return explanation or translation based on input DTO
+      const mockResponse = (dto.text && dto.context) ? MOCK_EXPLANATION_STRING : MOCK_TRANSLATION_STRING;
+
+      // Chunk the mock string
+      const chunkSize = 10; // Define chunk size
+      const chunks: string[] = [];
+      for (let i = 0; i < mockResponse.length; i += chunkSize) {
+        chunks.push(mockResponse.substring(i, i + chunkSize));
+      }
+
+      // Use concat to send events sequentially with delay between chunks
+      // No initial metadata chunk in this simplified version
+      return concat(
+        from(chunks).pipe( // Stream each chunk from the array
+          concatMap(chunk => timer(10).pipe(map(() => chunk))) // Add delay between chunks
+        ),
+        of('[DONE]') // Send done marker
+      );
+    }
+
+    // --- Original AI Logic (Simplified) ---
+    const providerName = dto.provider || 'deepseek'; // Default provider
+    const requestedModel = dto.model;
     this.logger.log(
-      `Attempting translation via Factory for provider: ${providerName}, model: ${requestedModel || 'default'}`,
+      `[V1 Forwarding] Attempting translation for provider: ${providerName}, model: ${requestedModel || 'default'}`,
     );
 
-    // 1. Get the appropriate provider instance from the factory
     const provider = this.aiProviderFactory.getProvider(providerName);
-
     if (!provider) {
-      this.logger.error(`AI Provider "${providerName}" is not available.`);
+      this.logger.error(
+        `[V1 Forwarding] AI Provider "${providerName}" is not available.`,
+      );
       return throwError(
         () =>
           new HttpException(
@@ -133,7 +102,7 @@ Important Rules:
       );
     }
 
-    // 2. Determine the final model name to use
+    // Determine model
     let finalModel: string;
     if (requestedModel) {
       finalModel = requestedModel;
@@ -144,94 +113,85 @@ Important Rules:
           break;
         case 'openrouter':
         default:
-          finalModel = 'deepseek/deepseek-chat-v3-0324:free';
+          finalModel = 'deepseek-chat'; // Default model for deepseek/openrouter
           break;
       }
       this.logger.log(
-        `No model specified for ${providerName}, using default: ${finalModel}`,
+        `[V1 Forwarding] No model specified for ${providerName}, using default: ${finalModel}`,
       );
     }
 
-    // 3. Build the prompt messages
-    const messages = this.buildPrompt(dto);
+    const messages = this.buildPrompt(dto); // Use the simplified prompt
 
-    // 4. Call the selected provider's stream generation method
+    // Use a Subject to manually control the output stream
+    const subject = new Subject<string>();
+    let streamErrored = false;
+
     try {
       this.logger.log(
-        `Calling ${providerName} provider with model ${finalModel}.`,
+        `[V1 Forwarding] Calling ${providerName} provider (raw stream) with model ${finalModel}.`,
       );
-      // Provider now returns Observable<StreamEventPayload<any>> containing parsed JSON lines
-      const streamFromProvider = provider.generateChatStream(
+      // Call the RAW stream method
+      const rawStreamFromProvider = provider.generateRawChatStream(
         messages,
         finalModel,
       );
 
-      // Process each event (parsed JSON line) from the provider and wrap it in ApiResponse
-      return streamFromProvider.pipe(
-        map((eventPayload: StreamEventPayload<any>) => {
-          // Simply wrap the received payload (which is already structured by the provider)
-          // The 'type' inside eventPayload now dictates the kind of info (e.g., 'context_explanation', 'definition')
-          if (eventPayload.type === 'fragment_error') {
-            // If provider parsed a fragment error JSON line, wrap it as an error ApiResponse
-            return ApiResponse.error<StreamEventPayload<any>>(
-              eventPayload.payload.message, // Use message from payload
-              'FRAGMENT_ERROR',
-              eventPayload, // Keep the original payload structure in data
-            ) as ApiResponse<StreamEventPayload<any>>; // Assertion needed due to static method signature
-          } else if (eventPayload.type === 'parsing_error') {
-            // If provider sent a parsing error event
-            return ApiResponse.error<StreamEventPayload<any>>(
-              eventPayload.payload.message,
-              'AI_JSON_PARSE_ERROR',
-              eventPayload,
-            ) as ApiResponse<StreamEventPayload<any>>;
-          } else {
-            // For all other valid event types from AI ('analysis_info', 'context_explanation', 'dictionary_start', etc.)
-            return ApiResponse.success(eventPayload, '', '0');
-          }
-        }),
-        catchError((err) => {
-          // Handle errors from the provider stream itself (e.g., network error, API key error)
-          this.logger.error(
-            `Error during stream generation for ${providerName}: ${err.message}`,
-            err.stack,
-          );
-          const errorPayload: StreamEventPayload<{ message: string }> = {
-            type: 'error', // Generic error type for stream failure
-            payload: {
-              message:
-                err.message || 'An unexpected error occurred during streaming',
-            },
-          };
-          // Return an Observable emitting the error ApiResponse, followed by a 'done' event indicating failure
-          return from([
-            ApiResponse.error<StreamEventPayload<{ message: string }>>(
-              err.message,
-              'STREAM_GENERATION_ERROR',
-              errorPayload,
-            ) as ApiResponse<StreamEventPayload<any>>, // Use Type Assertion
-            ApiResponse.success(
-              { type: 'done', payload: { status: 'failed' } }, // Signal stream ended due to error
-              'Stream ended with error',
-              '0',
-            ),
-          ]);
-        }),
-        // Note: The 'done' event with status 'completed' should now be sent by the AI
-        // as the last JSON line: {"type": "done"}
-        // and processed like any other event in the map operator above.
-        // We no longer need endWith here.
-      );
+      // Directly forward raw chunks
+      rawStreamFromProvider
+        .pipe(
+          finalize(() => {
+            this.logger.log('[V1 Forwarding] Raw stream finalized.');
+            if (!subject.closed) {
+              if (!streamErrored) {
+                subject.next('[DONE]');
+              }
+              subject.complete();
+            }
+          }),
+          catchError((err) => {
+            streamErrored = true;
+            this.logger.error(
+              `[V1 Forwarding] Error during raw stream generation for ${providerName}: ${err.message}`,
+              err.stack,
+            );
+            if (!subject.closed) {
+              subject.next('[ERROR]');
+              subject.complete();
+            }
+            return throwError(() => err);
+          }),
+        )
+        .subscribe({
+          next: (chunk: string) => {
+            if (subject.closed) return;
+            // Directly send the raw chunk
+            if (chunk && chunk.length > 0) {
+              subject.next(chunk);
+            }
+          },
+          error: (err) => {
+            this.logger.error('[V1 Forwarding] Raw stream subscription error:', err);
+          },
+          complete: () => {
+            this.logger.log('[V1 Forwarding] Raw stream subscription completed.');
+          },
+        });
+
+      return subject.asObservable();
     } catch (error) {
-      // Catch synchronous errors during setup (e.g., provider init)
       this.logger.error(
-        `Error invoking generateChatStream for provider ${providerName}:`,
+        `[V1 Forwarding] Error invoking generateRawChatStream for provider ${providerName}:`,
         error,
       );
+      if (!subject.closed) {
+        subject.error(error);
+        subject.complete();
+      }
       return throwError(
         () =>
           new HttpException(
-            `Failed to initiate stream with provider ${providerName}.`,
+            `[V1 Forwarding] Failed to initiate raw stream with provider ${providerName}.`,
             HttpStatus.INTERNAL_SERVER_ERROR,
           ),
       );
